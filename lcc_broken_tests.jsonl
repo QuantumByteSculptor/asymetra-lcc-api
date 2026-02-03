@@ -1,0 +1,8 @@
+{"features":{"vol_ann":0.002,"var95":0.0003,"var99":0.0005,"es95":0.0004,"es99":0.0007,"max_dd":0.08,"tuw_pct":12,"n_used":756,"missing_pct":0.0,"tail_obs_99":26,"asset_type":"equity","market":"EU"}}
+{"features":{"vol_ann":2.50,"var95":0.25,"var99":0.40,"es95":0.33,"es99":0.55,"max_dd":0.95,"tuw_pct":99,"n_used":756,"missing_pct":0.0,"tail_obs_99":7,"asset_type":"equity","market":"US"}}
+{"features":{"vol_ann":2.50,"var95":0.25,"var99":0.40,"es95":0.33,"es99":0.55,"max_dd":0.95,"tuw_pct":99,"n_used":756,"missing_pct":0.0,"tail_obs_99":7,"asset_type":"equity","market":"US"}}
+{"features":{"vol_ann":0.18,"var95":0.015,"var99":0.024,"es95":0.021,"es99":0.036,"max_dd":0.30,"tuw_pct":140,"n_used":756,"missing_pct":0.0,"tail_obs_99":18,"asset_type":"equity","market":"US"}}
+{"features":{"vol_ann":0.20,"var95":0.017,"var99":0.027,"es95":0.023,"es99":0.039,"max_dd":0.32,"tuw_pct":58,"n_used":120,"missing_pct":0.0,"tail_obs_99":3,"asset_type":"equity","market":"EU"}}
+{"features":{"vol_ann":0.95,"var95":0.080,"var99":0.140,"es95":0.110,"es99":0.190,"max_dd":0.88,"tuw_pct":97,"n_used":756,"missing_pct":0.0,"tail_obs_99":6,"asset_type":"equity","market":"EU"}}
+{"features":{"vol_ann":0.19,"var95":0.016,"var99":0.025,"es95":0.022,"es99":0.037,"max_dd":0.31,"tuw_pct":62,"n_used":756,"missing_pct":15.0,"tail_obs_99":17,"asset_type":"equity","market":"US"}}
+{"features":{"vol_ann":0.12,"var95":0.002,"var99":0.003,"es95":0.0025,"es99":0.0035,"max_dd":0.01,"tuw_pct":1,"n_used":756,"missing_pct":0.0,"tail_obs_99":30,"asset_type":"equity","market":"US"}}
