@@ -18,6 +18,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+def root():
+    return {
+        "service": "Asymetra LCC API",
+        "status": "running",
+        "endpoints": ["/health", "/score"],
+    }
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -100,3 +108,4 @@ async def score(req: Request):
         "thresholds": {"warn": warn, "block": block},
         "reasons": [],
     }
+
