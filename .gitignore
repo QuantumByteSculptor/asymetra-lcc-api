@@ -1,0 +1,11 @@
+# Generated datasets
+data/training/
+data/**/*.jsonl
+
+# Logs
+logs/
+exports/
+
+# Python cache
+__pycache__/
+*.pyc
