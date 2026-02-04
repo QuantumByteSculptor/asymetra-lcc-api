@@ -31,26 +31,26 @@ def load_jsonl(path: str) -> List[Dict[str, Any]]:
 
 
 def build_frame(items: List[Dict[str, Any]]) -> pd.DataFrame:
-    # Expand to dataframe of engineered features
     recs = []
     for it in items:
         feats = it["features"]
         rec = features_to_row(feats, cfg=DEFAULT_CONFIG)
-        # Keep for per-class calibration
         rec["_asset_type"] = (feats.get("asset_type") or "").strip().lower()
         rec["_market"] = (feats.get("market") or "").strip().upper()
         recs.append(rec)
+
     df = pd.DataFrame.from_records(recs)
-    # ensure stable column order
+
     cols = vector_columns(DEFAULT_CONFIG)
     for c in cols:
         if c not in df.columns:
             df[c] = np.nan
+
     df = df[cols + ["_asset_type", "_market"]]
     return df
 
 
-def fit_models(X: np.ndarray, contamination: float, seed: int):
+def fit_models(X: np.ndarray, contamination: float, seed: int) -> Tuple[Pipeline, Pipeline]:
     if_model = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
@@ -65,7 +65,6 @@ def fit_models(X: np.ndarray, contamination: float, seed: int):
     )
     if_model.fit(X)
 
-    # LOF: cannot "predict" on new data unless novelty=True (scikit-learn supports novelty)
     lof_model = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
@@ -83,19 +82,25 @@ def fit_models(X: np.ndarray, contamination: float, seed: int):
     return if_model, lof_model
 
 
-def score_anomaly(model: Pipeline, X: np.ndarray, kind: str) -> np.ndarray:
+def _transform_X(pipe: Pipeline, X: np.ndarray) -> np.ndarray:
+    """Apply same preprocessing as training pipeline (imputer + scaler)."""
+    imp = pipe.named_steps["imputer"]
+    sca = pipe.named_steps["scaler"]
+    return sca.transform(imp.transform(X))
+
+
+def anomaly_scores_from_models(if_model: Pipeline, lof_model: Pipeline, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Convert model score -> anomaly score where higher = more anomalous.
-    IsolationForest.score_samples: higher is more normal -> negate
-    LOF.score_samples: higher is more normal -> negate
+    Return anomaly scores where higher = more anomalous.
+    Both IsolationForest.score_samples and LOF.score_samples: higher => more normal, so we negate.
     """
-    if kind == "if":
-        s = model.named_steps["iforest"].score_samples(model.named_steps["scaler"].transform(model.named_steps["imputer"].transform(X)))
-        return -s
-    if kind == "lof":
-        s = model.named_steps["lof"].score_samples(model.named_steps["scaler"].transform(model.named_steps["imputer"].transform(X)))
-        return -s
-    raise ValueError("unknown kind")
+    Xi_if = _transform_X(if_model, X)
+    s_if = -if_model.named_steps["iforest"].score_samples(Xi_if)
+
+    Xi_lof = _transform_X(lof_model, X)
+    s_lof = -lof_model.named_steps["lof"].score_samples(Xi_lof)
+
+    return s_if, s_lof
 
 
 def calibrate_thresholds(scores: np.ndarray, warn_q: float, block_q: float) -> Tuple[float, float]:
@@ -104,15 +109,28 @@ def calibrate_thresholds(scores: np.ndarray, warn_q: float, block_q: float) -> T
     return warn, block
 
 
+def safe_mean_std(x: np.ndarray) -> Tuple[float, float]:
+    mu = float(np.nanmean(x))
+    sigma = float(np.nanstd(x))
+    if not np.isfinite(sigma) or sigma < 1e-9:
+        sigma = 1e-9
+    return mu, sigma
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True, help="Path to lcc_runs.jsonl")
+    ap.add_argument("--input", required=True, help="Path to training JSONL (e.g. lcc_train.jsonl)")
     ap.add_argument("--out", default="models/unsup_bundle.joblib", help="Output bundle path")
     ap.add_argument("--contamination", type=float, default=0.03, help="Expected anomaly rate")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--warn_q", type=float, default=0.97, help="Warn quantile on training scores")
-    ap.add_argument("--block_q", type=float, default=0.995, help="Block quantile on training scores")
+    ap.add_argument("--warn_q", type=float, default=0.97, help="Warn quantile on training ensemble scores")
+    ap.add_argument("--block_q", type=float, default=0.995, help="Block quantile on training ensemble scores")
+    ap.add_argument("--w_if", type=float, default=0.6, help="Weight for IsolationForest in ensemble")
+    ap.add_argument("--w_lof", type=float, default=0.4, help="Weight for LOF in ensemble")
     args = ap.parse_args()
+
+    if abs((args.w_if + args.w_lof) - 1.0) > 1e-6:
+        raise ValueError("w_if + w_lof must equal 1.0")
 
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
 
@@ -124,28 +142,32 @@ def main():
 
     if_model, lof_model = fit_models(X, contamination=args.contamination, seed=args.seed)
 
-    # Ensemble score = average of normalized scores (simple)
-    if_scores = score_anomaly(if_model, X, "if")
-    lof_scores = score_anomaly(lof_model, X, "lof")
+    # Raw anomaly scores (higher = more anomalous)
+    if_scores, lof_scores = anomaly_scores_from_models(if_model, lof_model, X)
 
-    # normalize to z-scores for combining
-    def z(x):
-        return (x - np.nanmean(x)) / (np.nanstd(x) + 1e-9)
+    # Freeze normalization params on TRAIN only (critical!)
+    if_mu, if_sigma = safe_mean_std(if_scores)
+    lof_mu, lof_sigma = safe_mean_std(lof_scores)
 
-    ens = 0.6 * z(if_scores) + 0.4 * z(lof_scores)
+    # Ensemble in normalized space (this is what thresholds will be calibrated on)
+    ens = (
+        args.w_if * ((if_scores - if_mu) / if_sigma) +
+        args.w_lof * ((lof_scores - lof_mu) / lof_sigma)
+    )
 
     warn, block = calibrate_thresholds(ens, args.warn_q, args.block_q)
 
-    # Per-asset-type threshold calibration (more stable in practice)
-    per_asset = {}
+    # Per-asset thresholds
+    per_asset: Dict[str, Dict[str, Any]] = {}
     for atype in sorted(set(df["_asset_type"].tolist())):
         if not atype:
             continue
-        mask = df["_asset_type"] == atype
-        if mask.sum() < 50:
+        mask = (df["_asset_type"] == atype)
+        n = int(mask.sum())
+        if n < 80:
             continue
         warn_a, block_a = calibrate_thresholds(ens[mask.to_numpy()], args.warn_q, args.block_q)
-        per_asset[atype] = {"warn": warn_a, "block": block_a, "n": int(mask.sum())}
+        per_asset[atype] = {"warn": float(warn_a), "block": float(block_a), "n": n}
 
     bundle = {
         "config": DEFAULT_CONFIG,
@@ -154,19 +176,31 @@ def main():
             "iforest": if_model,
             "lof": lof_model,
         },
-        "ensemble_weights": {"if": 0.6, "lof": 0.4},
-        "thresholds_global": {"warn": warn, "block": block, "warn_q": args.warn_q, "block_q": args.block_q},
+        "ensemble_weights": {"if": float(args.w_if), "lof": float(args.w_lof)},
+        "score_norm": {
+            "if": {"mu": if_mu, "sigma": if_sigma},
+            "lof": {"mu": lof_mu, "sigma": lof_sigma},
+        },
+        "thresholds_global": {
+            "warn": float(warn),
+            "block": float(block),
+            "warn_q": float(args.warn_q),
+            "block_q": float(args.block_q),
+        },
         "thresholds_per_asset_type": per_asset,
         "meta": {
-            "contamination": args.contamination,
-            "seed": args.seed,
-            "version": "unsup_v1",
+            "contamination": float(args.contamination),
+            "seed": int(args.seed),
+            "version": "unsup_v2_normed",
         }
     }
 
     joblib.dump(bundle, args.out)
+
     print(f"Saved bundle to {args.out}")
     print(f"Global thresholds: WARN>={warn:.4f}, BLOCK>={block:.4f}")
+    print(f"Score norm: IF(mu={if_mu:.6f}, sigma={if_sigma:.6f}) LOF(mu={lof_mu:.6f}, sigma={lof_sigma:.6f})")
+
     if per_asset:
         print("Per-asset thresholds:")
         for k, v in per_asset.items():
@@ -175,4 +209,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

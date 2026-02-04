@@ -15,7 +15,9 @@ from typing import Dict, Any, List, Tuple
 OUT_DIR = Path(".")
 N_CLEAN = 5000
 N_BORDERLINE = 1000
+N_SEMI_BROKEN = 700         # semi-broken goes INTO training
 N_BROKEN = 500
+HOLDOUT_CLEAN = 800         # clean holdout for false-positive rate
 
 SEED = 42
 
@@ -299,6 +301,73 @@ def make_broken(f: Dict[str, Any]) -> Dict[str, Any]:
     return g
 
 # -----------------------------
+# Semi-broken realistic modes (soft anomalies)
+# -----------------------------
+SEMI_BROKEN_MODES = [
+    "partial_units_percent_mix",
+    "vol_window_inconsistent",
+    "var_es_too_close",
+    "tail_obs_inconsistent",
+    "coverage_contradiction",
+    "es_not_extreme_enough",
+]
+
+def make_semi_broken(f: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Semi-broken cases: realistic bugs that are not always caught by hard rules,
+    and should be learnable by ML (soft detector).
+    """
+    g = dict(f)
+    mode = random.choice(SEMI_BROKEN_MODES)
+    g["semi_broken_mode"] = mode
+    g["status_rules"] = "SEMI_BROKEN_SIM"
+
+    if mode == "partial_units_percent_mix":
+        # Only some metrics mistakenly in percent (not all)
+        # e.g., VaR/ES in percent but vols remain decimal, or vice-versa.
+        if random.random() < 0.5:
+            for k in ["var95", "var99", "es95", "es99"]:
+                if k in g and isinstance(g[k], (int, float)):
+                    g[k] = float(g[k] * 100.0)
+        else:
+            for k in ["vol_ann", "vol_20d"]:
+                if k in g and isinstance(g[k], (int, float)):
+                    g[k] = float(g[k] * 100.0)
+
+    elif mode == "vol_window_inconsistent":
+        # vol_ann is plausible, but vol_20d is wrong due to bad scaling/window confusion
+        expected = float(g["vol_ann"] / math.sqrt(252) * math.sqrt(20))
+        mult = rand_trunc_normal(1.0, 0.35, 0.45, 1.85)
+        g["vol_20d"] = float(expected * mult)
+
+    elif mode == "var_es_too_close":
+        v95 = float(g["var95"])
+        g["var99"] = float(v95 - abs(v95) * rand_trunc_normal(0.005, 0.006, 0.0005, 0.02))
+        g["es95"] = float(g["var95"] * rand_trunc_normal(1.01, 0.01, 1.00, 1.05))
+        g["es99"] = float(g["var99"] * rand_trunc_normal(1.01, 0.01, 1.00, 1.05))
+
+    elif mode == "tail_obs_inconsistent":
+        n = int(g.get("n_used", 300))
+        g["tail_obs_99"] = max(1, int(rand_trunc_normal(mu=3.0, sigma=2.0, lo=1.0, hi=10.0)))
+        if random.random() < 0.35:
+            g["n_used"] = int(clamp(int(n * rand_trunc_normal(0.75, 0.10, 0.55, 0.92)), 80, 900))
+
+    elif mode == "coverage_contradiction":
+        if random.random() < 0.5:
+            g["missing_pct"] = float(clamp(g["missing_pct"] * rand_trunc_normal(0.35, 0.15, 0.0, 0.6), 0.0, 0.06))
+            g["tuw_pct"] = float(clamp(g["tuw_pct"] * rand_trunc_normal(0.45, 0.10, 0.20, 0.65), 10.0, 100.0))
+        else:
+            g["missing_pct"] = float(clamp(g["missing_pct"] * rand_trunc_normal(4.0, 0.8, 1.8, 7.0), 0.02, 0.35))
+            g["tuw_pct"] = float(clamp(g["tuw_pct"] * rand_trunc_normal(1.08, 0.08, 0.95, 1.20), 60.0, 100.0))
+
+    elif mode == "es_not_extreme_enough":
+        g["es95"] = float(g["var95"] * rand_trunc_normal(1.02, 0.015, 1.00, 1.06))
+        g["es99"] = float(g["var99"] * rand_trunc_normal(1.02, 0.015, 1.00, 1.06))
+        g["es99"] = min(float(g["es99"]), float(g["es95"]) - abs(float(g["es95"])) * 0.001)
+
+    return g
+
+# -----------------------------
 # Writer
 # -----------------------------
 def write_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
@@ -312,6 +381,7 @@ def main() -> None:
 
     clean: List[Dict[str, Any]] = []
     borderline: List[Dict[str, Any]] = []
+    semi_broken: List[Dict[str, Any]] = []
     broken: List[Dict[str, Any]] = []
 
     # CLEAN
@@ -325,6 +395,11 @@ def main() -> None:
         base = random.choice(clean)
         borderline.append(make_borderline(base))
 
+    # SEMI-BROKEN: realistic near-bugs to INCLUDE in training
+    for i in range(N_SEMI_BROKEN):
+        base = random.choice(clean)
+        semi_broken.append(make_semi_broken(base))
+
     # BROKEN: start from clean then inject realistic bugs
     for i in range(N_BROKEN):
         base = random.choice(clean)
@@ -333,18 +408,45 @@ def main() -> None:
     # Shuffle a bit
     random.shuffle(clean)
     random.shuffle(borderline)
+    random.shuffle(semi_broken)
     random.shuffle(broken)
 
+    # CLEAN HOLDOUT: measure false positives (should stay low)
+    clean_holdout = clean[:HOLDOUT_CLEAN]
+
+    # Raw datasets
     write_jsonl(OUT_DIR / "lcc_runs.jsonl", clean)
     write_jsonl(OUT_DIR / "lcc_borderline.jsonl", borderline)
+    write_jsonl(OUT_DIR / "lcc_semi_broken.jsonl", semi_broken)
     write_jsonl(OUT_DIR / "lcc_broken_tests.jsonl", broken)
 
+    # Ready-to-use splits
+    # Train: clean + borderline + semi-broken (soft anomalies)
+    train_rows = clean + borderline + semi_broken
+    random.shuffle(train_rows)
+    write_jsonl(OUT_DIR / "lcc_train.jsonl", train_rows)
+
+    # Eval: true broken realistic bugs (should be mostly WARN/BLOCK)
+    write_jsonl(OUT_DIR / "lcc_eval.jsonl", broken)
+
+    # Holdout: clean-only subset (track false positives)
+    write_jsonl(OUT_DIR / "lcc_clean_holdout.jsonl", clean_holdout)
+
     print("✅ Generated:")
-    print(f" - {OUT_DIR/'lcc_runs.jsonl'}           ({len(clean)} rows)")
-    print(f" - {OUT_DIR/'lcc_borderline.jsonl'}     ({len(borderline)} rows)")
-    print(f" - {OUT_DIR/'lcc_broken_tests.jsonl'}   ({len(broken)} rows)")
-    print("Tip: start by training on lcc_runs.jsonl, then evaluate on borderline+broken.")
+    print(f" - {OUT_DIR/'lcc_runs.jsonl'}              ({len(clean)} rows)  [clean base]")
+    print(f" - {OUT_DIR/'lcc_borderline.jsonl'}        ({len(borderline)} rows)  [borderline]")
+    print(f" - {OUT_DIR/'lcc_semi_broken.jsonl'}       ({len(semi_broken)} rows)  [semi-broken]")
+    print(f" - {OUT_DIR/'lcc_broken_tests.jsonl'}      ({len(broken)} rows)  [broken]")
+    print("")
+    print("✅ Splits ready:")
+    print(f" - {OUT_DIR/'lcc_train.jsonl'}             ({len(train_rows)} rows)  [TRAIN]")
+    print(f" - {OUT_DIR/'lcc_eval.jsonl'}              ({len(broken)} rows)  [EVAL]")
+    print(f" - {OUT_DIR/'lcc_clean_holdout.jsonl'}     ({len(clean_holdout)} rows)  [CLEAN HOLDOUT]")
+    print("")
+    print("Tip: train on lcc_train.jsonl, evaluate on lcc_eval.jsonl, and track false positives on lcc_clean_holdout.jsonl.")
 
 if __name__ == "__main__":
     main()
+
+
 
