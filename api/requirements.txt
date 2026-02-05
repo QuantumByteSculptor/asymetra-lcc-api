@@ -1,16 +1,9 @@
 fastapi==0.110.0
 uvicorn[standard]==0.27.1
-
-# Core numerical stack
-numpy==1.26.4
-pandas==2.2.0
-
-# ML
-scikit-learn==1.8.0
 joblib==1.4.2
-
-# Data source
-yfinance==0.2.36
-
-# Validation
+numpy==1.26.4
+scikit-learn==1.8.0
 pydantic==2.6.4
+pandas==3.0.0
+yfinance==0.2.66
+requests==2.32.3
