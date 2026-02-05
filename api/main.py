@@ -18,10 +18,6 @@ import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-# ✅ NEW: extra metrics deps
-from scipy.stats import skew as _scipy_skew, kurtosis as _scipy_kurtosis
-from arch import arch_model
-
 # Reuse your existing feature builder (from your ML LCC project)
 from features import DEFAULT_CONFIG, features_to_row, vector_columns
 
@@ -54,7 +50,7 @@ UNSUP_MAX_MISSING_COUNT = int(os.getenv("UNSUP_MAX_MISSING_COUNT", "0"))  # 0 = 
 # =============================
 # FastAPI
 # =============================
-app = FastAPI(title="Asymetra LCC API", version="1.6-oracle-garch+stressvar+stooq")
+app = FastAPI(title="Asymetra LCC API", version="1.7-oracle-garch+stressvar+stooq-UA")
 
 
 # =============================
@@ -269,14 +265,7 @@ class OracleCache:
             out = []
             for ck, m, t, f, e, s in cur.fetchall():
                 out.append(
-                    {
-                        "cache_key": ck,
-                        "market": m,
-                        "ticker": t,
-                        "fetched_at_utc": f,
-                        "expires_at_utc": e,
-                        "source": s,
-                    }
+                    {"cache_key": ck, "market": m, "ticker": t, "fetched_at_utc": f, "expires_at_utc": e, "source": s}
                 )
             return out
 
@@ -326,9 +315,8 @@ def _as_close_series(df: pd.DataFrame, ticker: str) -> pd.Series:
 
 def _download_daily_stooq(ticker: str, lookback_days: int, market: str) -> pd.Series:
     """
-    Fallback data source when Yahoo/yfinance returns empty from cloud providers.
-    - US equities: AAPL.US
-    - Some indices/ETFs may not exist on Stooq; returns empty series then.
+    Robust Stooq downloader.
+    Fixes cloud/provider blocks where Stooq returns HTML/anti-bot instead of CSV.
     """
     t = (ticker or "").strip()
     if not t:
@@ -336,21 +324,48 @@ def _download_daily_stooq(ticker: str, lookback_days: int, market: str) -> pd.Se
 
     m = (market or "").upper()
 
-    # crude mapping: only auto-add .US for US market when no suffix provided
+    # Auto-add .US only for US market when user provides plain ticker
     if "." not in t and m == "US":
         t_stooq = f"{t}.US"
     else:
         t_stooq = t
 
     url = f"https://stooq.com/q/d/l/?s={t_stooq.lower()}&i=d"
-    r = requests.get(url, timeout=20)
+
+    headers = {
+        # Stooq sometimes blocks default python-requests UA from cloud providers.
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/csv,text/plain;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "close",
+    }
+
+    r = requests.get(url, headers=headers, timeout=25)
     r.raise_for_status()
 
-    df = pd.read_csv(io.StringIO(r.text))
+    txt = (r.text or "").strip()
+    if not txt:
+        raise RuntimeError("stooq returned empty body")
+
+    # Stooq CSV should start with header line like:
+    # Date,Open,High,Low,Close,Volume
+    first_line = txt.splitlines()[0].strip()
+    if not first_line.lower().startswith("date,open,high,low,close"):
+        # very likely HTML / anti-bot page or some error payload
+        sample = txt[:300].replace("\n", "\\n")
+        raise RuntimeError(
+            f"stooq non-csv response (first_line='{first_line[:80]}') sample='{sample}'"
+        )
+
+    df = pd.read_csv(io.StringIO(txt))
     if df is None or df.empty or "Close" not in df.columns or "Date" not in df.columns:
-        return pd.Series(dtype=float)
+        raise RuntimeError(
+            f"stooq parsed but missing columns: cols={list(df.columns) if df is not None else None}"
+        )
 
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
     df = df.dropna(subset=["Date", "Close"]).sort_values("Date")
 
     close = pd.Series(df["Close"].to_numpy(dtype=float), index=df["Date"]).dropna()
@@ -363,7 +378,7 @@ def _download_daily_yf(ticker: str, lookback_days: int, max_tries: int, sleep_tr
     last_err: Optional[Exception] = None
     t = (ticker or "").strip()
 
-    # 1) start/end (plus fiable quand Yahoo accepte la requête)
+    # 1) start/end
     period_days = int(max(lookback_days * 3, lookback_days + 120))
     end = pd.Timestamp.utcnow().normalize()
     start_s = (end - pd.Timedelta(days=period_days)).date().isoformat()
@@ -456,7 +471,125 @@ def _rsi(series: pd.Series, period: int = 14) -> float:
     return float(100 - (100 / (1 + rs.iloc[-1])))
 
 
-# ✅ UPDATED: adds skew, kurtosis, stress VaR/ES, GARCH vol, error surface
+def _skew_kurtosis(x: np.ndarray) -> Tuple[float, float]:
+    """
+    Returns (skew, kurtosis_excess).
+    kurtosis_excess = kurtosis - 3
+    """
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    n = len(x)
+    if n < 20:
+        return (float("nan"), float("nan"))
+
+    m = x.mean()
+    c = x - m
+    s2 = float(np.mean(c * c))
+    if s2 <= 1e-18:
+        return (0.0, -3.0)
+
+    s = np.sqrt(s2)
+    m3 = float(np.mean(c**3))
+    m4 = float(np.mean(c**4))
+
+    skew = float(m3 / (s**3 + 1e-12))
+    kurt_excess = float(m4 / (s2**2 + 1e-12) - 3.0)
+    return skew, kurt_excess
+
+
+def _ewma_vol_ann(returns: np.ndarray, lam: float = 0.94, ann: int = 252) -> float:
+    """
+    RiskMetrics EWMA volatility (annualized).
+    """
+    r = np.asarray(returns, dtype=float)
+    r = r[np.isfinite(r)]
+    if len(r) < 30:
+        return float("nan")
+
+    var = float(np.var(r, ddof=1))
+    for x in r:
+        var = lam * var + (1.0 - lam) * (x * x)
+
+    vol = np.sqrt(max(var, 0.0))
+    return float(vol * np.sqrt(ann))
+
+
+def _garch_vol_ann(returns: np.ndarray, ann: int = 252) -> Optional[float]:
+    """
+    GARCH(1,1) via 'arch' package.
+    Returns annualized conditional volatility (last value) or None if fitting fails.
+    """
+    try:
+        from arch import arch_model  # type: ignore
+    except Exception:
+        return None
+
+    r = np.asarray(returns, dtype=float)
+    r = r[np.isfinite(r)]
+    if len(r) < 200:
+        return None
+
+    rp = 100.0 * r  # arch likes percent returns
+    try:
+        am = arch_model(rp, vol="GARCH", p=1, q=1, mean="Zero", dist="normal")
+        res = am.fit(disp="off")
+        cond_vol_daily_pct = float(res.conditional_volatility.iloc[-1])
+        cond_vol_daily = cond_vol_daily_pct / 100.0
+        return float(cond_vol_daily * np.sqrt(ann))
+    except Exception:
+        return None
+
+
+def _stress_var(
+    returns: np.ndarray,
+    base_var99: Optional[float],
+    window: int = 20,
+    q: float = 0.99,
+) -> Dict[str, Any]:
+    """
+    Stress VaR:
+    - trouve la pire fenêtre glissante (par performance cumulée)
+    - calcule VaR_q dans cette fenêtre
+    - calcule un multiplicateur vs VaR99 "normale" si dispo
+    """
+    r = np.asarray(returns, dtype=float)
+    r = r[np.isfinite(r)]
+    n = len(r)
+    if n < max(60, window + 10):
+        return {"stress_var99": None, "stress_multiplier": None}
+
+    worst_i = None
+    worst_cum = 1e9
+
+    for i in range(0, n - window + 1):
+        w = r[i : i + window]
+        cum = float(np.prod(1.0 + w) - 1.0)
+        if cum < worst_cum:
+            worst_cum = cum
+            worst_i = i
+
+    if worst_i is None:
+        return {"stress_var99": None, "stress_multiplier": None}
+
+    w = r[worst_i : worst_i + window]
+    losses = -w
+    v = float(np.quantile(losses, q))
+    stress_var = v if np.isfinite(v) else float("nan")
+
+    mult = None
+    if base_var99 is not None and np.isfinite(base_var99) and base_var99 > 1e-12 and np.isfinite(stress_var):
+        mult = float(stress_var / base_var99)
+
+    return {
+        "stress_window_start_idx": int(worst_i),
+        "stress_window_end_idx": int(worst_i + window - 1),
+        "stress_cumret": float(worst_cum),
+        "stress_var99": float(stress_var) if np.isfinite(stress_var) else None,
+        "stress_multiplier": float(mult) if mult is not None and np.isfinite(mult) else None,
+        "stress_window_days": int(window),
+    }
+
+
 def _oracle_compute_from_closes(
     asset_type: str,
     market: str,
@@ -486,61 +619,12 @@ def _oracle_compute_from_closes(
 
     tail_obs_99 = int(max(0, np.sum((-ret252).to_numpy(dtype=float) >= (v99 if np.isfinite(v99) else 1e9))))
 
-    # =============================
-    # Extra metrics: skew / kurtosis / stress VaR / GARCH
-    # =============================
-    r = ret252.dropna().to_numpy(dtype=float)
-
-    # Skew & kurtosis (kurtosis "classique", fisher=False => normal ≈ 3)
-    skew_v = None
-    kurt_v = None
-    if len(r) >= 30 and np.isfinite(r).all():
-        try:
-            skew_v = float(_scipy_skew(r, bias=False))
-        except Exception:
-            skew_v = None
-        try:
-            kurt_v = float(_scipy_kurtosis(r, fisher=False, bias=False))
-        except Exception:
-            kurt_v = None
-
-    # Stress VaR / ES: amplification des pertes (working theory simple & stable)
-    stress_var99 = None
-    stress_es99 = None
-    if len(r) >= 60 and np.isfinite(r).all():
-        try:
-            downside_mult = 1.5
-            upside_mult = 0.8
-            r_stress = np.where(r < 0, r * downside_mult, r * upside_mult)
-
-            losses_stress = -r_stress
-            stress_var99 = float(np.quantile(losses_stress, 0.99))
-            tail = losses_stress[losses_stress >= stress_var99]
-            stress_es99 = float(tail.mean()) if len(tail) else stress_var99
-        except Exception:
-            stress_var99 = None
-            stress_es99 = None
-
-    # GARCH(1,1) annualized volatility (sur returns * 100, convention arch)
-    garch_ok = False
-    garch_error = None
-    garch_vol_ann = None
-    if len(r) >= 120 and np.isfinite(r).all():
-        try:
-            r_pct = (pd.Series(r) * 100.0).astype(float)
-
-            # Student-t (souvent plus robuste sur queues épaisses)
-            am = arch_model(r_pct, mean="Zero", vol="GARCH", p=1, q=1, dist="t")
-            res = am.fit(disp="off", show_warning=False)
-
-            # conditional_volatility en % (daily)
-            cond_vol_daily_pct = float(res.conditional_volatility.iloc[-1])
-            garch_vol_ann = float((cond_vol_daily_pct / 100.0) * np.sqrt(252))
-            garch_ok = True
-        except Exception as e:
-            garch_ok = False
-            garch_error = str(e)
-            garch_vol_ann = None
+    # Extra metrics
+    r = ret252.to_numpy(dtype=float)
+    skew, kurt_excess = _skew_kurtosis(r)
+    vol_ewma_ann = _ewma_vol_ann(r, lam=0.94, ann=252)
+    vol_garch_ann = _garch_vol_ann(r, ann=252)
+    stress = _stress_var(r, base_var99=(v99 if np.isfinite(v99) else None), window=20, q=0.99)
 
     return {
         "asset_type": asset_type,
@@ -559,14 +643,15 @@ def _oracle_compute_from_closes(
         "tail_obs_99": tail_obs_99,
         "rsi": float(_rsi(closes)) if len(closes) >= 20 else None,
         "corr_mkt": 0.0,
-        # New fields
-        "skew": skew_v,
-        "kurtosis": kurt_v,
-        "stress_var99": stress_var99,
-        "stress_es99": stress_es99,
-        "garch_ok": garch_ok,
-        "garch_vol_ann": garch_vol_ann,
-        "garch_error": garch_error,
+        # added
+        "skew": float(skew) if np.isfinite(skew) else None,
+        "kurtosis_excess": float(kurt_excess) if np.isfinite(kurt_excess) else None,
+        "vol_ewma_ann": float(vol_ewma_ann) if np.isfinite(vol_ewma_ann) else None,
+        "vol_garch_ann": float(vol_garch_ann) if vol_garch_ann is not None and np.isfinite(vol_garch_ann) else None,
+        "stress_var99": stress.get("stress_var99"),
+        "stress_multiplier": stress.get("stress_multiplier"),
+        "stress_window_days": stress.get("stress_window_days"),
+        "stress_cumret": stress.get("stress_cumret"),
     }
 
 
@@ -628,6 +713,7 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
             "oracle_cache_expires_at_utc": expires,
         }
         return feats, meta
+
     except Exception as yf_err:
         # 3) Fallback Stooq (cache separate key)
         source2 = "stooq"
@@ -645,9 +731,15 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
             }
             return feats, meta
 
-        close2 = _download_daily_stooq(ticker, req.lookback_days, market=market)
+        try:
+            close2 = _download_daily_stooq(ticker, req.lookback_days, market=market)
+        except Exception as stooq_err:
+            raise RuntimeError(f"yfinance failed ({yf_err}) and stooq failed ({stooq_err})")
+
         if len(close2) < req.lookback_days + 2:
-            raise RuntimeError(f"yfinance failed ({yf_err}) and stooq insufficient closes len={len(close2)}")
+            raise RuntimeError(
+                f"yfinance failed ({yf_err}) and stooq insufficient closes len={len(close2)}"
+            )
 
         feats2 = _oracle_compute_from_closes(asset_type, market, ticker, close2, req.lookback_days)
 
@@ -679,6 +771,10 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
 # Unsupervised scoring (IF + LOF) ✅ robust (no NaN) + coverage
 # =============================
 def _unsup_vector_numpy(feats: Dict[str, Any], cfg: Dict[str, Any], cols: list[str]) -> np.ndarray:
+    """
+    Builds 1xD vector, imputes NaNs to 0 at the end.
+    Used for actual model scoring.
+    """
     row_dict = features_to_row(feats, cfg=cfg)
     row = []
 
@@ -712,6 +808,10 @@ def _unsup_vector_numpy(feats: Dict[str, Any], cfg: Dict[str, Any], cols: list[s
 
 
 def _unsup_missing_coverage(feats: Dict[str, Any], cfg: Dict[str, Any], cols: list[str]) -> Tuple[int, float, List[str]]:
+    """
+    Measures how many UNSUP inputs are missing BEFORE imputation.
+    Returns: (missing_count, missing_ratio, missing_columns_sample)
+    """
     row_dict = features_to_row(feats, cfg=cfg)
 
     missing_cols: List[str] = []
@@ -852,7 +952,7 @@ def _xgb_shadow_score(feats: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 # =============================
-# Integrity mini-checks (simple & safe)
+# Integrity mini-checks
 # =============================
 def _integrity_flags(feats: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     flags: List[str] = []
@@ -949,7 +1049,6 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
     _require_api_key(x_api_key)
 
     lovable_feats = _features_dict(req.lovable)
-
     integrity_flags, integrity_critical = _integrity_flags(lovable_feats)
     unsup = _unsup_score(lovable_feats)
 
@@ -1090,6 +1189,8 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
         out["oracle_meta"] = oracle_meta
 
     return out
+
+
 
 
 
