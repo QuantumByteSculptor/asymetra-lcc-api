@@ -4,6 +4,14 @@ joblib==1.4.2
 numpy==1.26.4
 scikit-learn==1.8.0
 pydantic==2.6.4
-pandas==3.0.0
-yfinance==0.2.66
+
+# Oracle deps
+pandas==2.2.2
+yfinance==0.2.40
 requests==2.32.3
+
+# Oracle extra metrics (GARCH)
+arch==6.3.0
+scipy==1.12.0
+statsmodels==0.14.1
+
