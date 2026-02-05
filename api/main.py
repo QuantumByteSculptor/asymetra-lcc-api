@@ -658,16 +658,17 @@ def _oracle_compute_from_closes(
 def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     asset_type = (req.asset_type or "").strip().lower()
     market = (req.market or "").strip().upper()
-    ticker = (req.ticker or "").strip()
+    ticker = (req.ticker or "").strip() if req.ticker else ""
 
-    # Provided closes (no download)
-    if req.closes:
+    # ✅ Cas 0: closes fournis ET pas de ticker -> compute direct (pas de download possible)
+    if req.closes and not ticker:
         closes = pd.Series(req.closes, dtype=float)
-        feats = _oracle_compute_from_closes(asset_type, market, req.ticker, closes, req.lookback_days)
+        feats = _oracle_compute_from_closes(asset_type, market, None, closes, req.lookback_days)
         meta = {"oracle_source": "provided_closes", "oracle_cache_hit": False}
         return feats, meta
 
-    if not ticker:
+    # ✅ Si pas de ticker et pas de closes -> impossible
+    if not ticker and not req.closes:
         raise ValueError("ticker required when closes not provided")
 
     now = _utc_now()
@@ -733,38 +734,49 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
 
         try:
             close2 = _download_daily_stooq(ticker, req.lookback_days, market=market)
+            if len(close2) < req.lookback_days + 2:
+                raise RuntimeError(f"stooq insufficient closes len={len(close2)}")
+
+            feats2 = _oracle_compute_from_closes(asset_type, market, ticker, close2, req.lookback_days)
+
+            expires2 = now + int(ttl)
+            _ORACLE_CACHE.set(
+                OracleCacheRow(
+                    cache_key=key2,
+                    asset_type=asset_type,
+                    market=market,
+                    ticker=ticker,
+                    lookback_days=int(req.lookback_days),
+                    source=source2,
+                    fetched_at_utc=now,
+                    expires_at_utc=expires2,
+                    row_json=json.dumps(feats2, ensure_ascii=False),
+                )
+            )
+            meta2 = {
+                "oracle_source": source2,
+                "oracle_cache_hit": False,
+                "oracle_cache_ttl_seconds": ttl,
+                "oracle_cache_expires_at_utc": expires2,
+                "oracle_yfinance_error": str(yf_err),
+            }
+            return feats2, meta2
+
         except Exception as stooq_err:
+            # ✅ Patch minimal: fallback final sur closes si Lovable les a envoyés
+            if req.closes:
+                closes = pd.Series(req.closes, dtype=float)
+                feats3 = _oracle_compute_from_closes(asset_type, market, ticker, closes, req.lookback_days)
+                meta3 = {
+                    "oracle_source": "provided_closes_fallback",
+                    "oracle_cache_hit": False,
+                    "oracle_yfinance_error": str(yf_err),
+                    "oracle_stooq_error": str(stooq_err),
+                }
+                return feats3, meta3
+
+            # sinon: erreur explicite
             raise RuntimeError(f"yfinance failed ({yf_err}) and stooq failed ({stooq_err})")
-
-        if len(close2) < req.lookback_days + 2:
-            raise RuntimeError(
-                f"yfinance failed ({yf_err}) and stooq insufficient closes len={len(close2)}"
-            )
-
-        feats2 = _oracle_compute_from_closes(asset_type, market, ticker, close2, req.lookback_days)
-
-        expires2 = now + int(ttl)
-        _ORACLE_CACHE.set(
-            OracleCacheRow(
-                cache_key=key2,
-                asset_type=asset_type,
-                market=market,
-                ticker=ticker,
-                lookback_days=int(req.lookback_days),
-                source=source2,
-                fetched_at_utc=now,
-                expires_at_utc=expires2,
-                row_json=json.dumps(feats2, ensure_ascii=False),
-            )
-        )
-        meta2 = {
-            "oracle_source": source2,
-            "oracle_cache_hit": False,
-            "oracle_cache_ttl_seconds": ttl,
-            "oracle_cache_expires_at_utc": expires2,
-            "oracle_yfinance_error": str(yf_err),
-        }
-        return feats2, meta2
 
 
 # =============================
@@ -1104,16 +1116,26 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
     oracle_used = False
     oracle_feats: Optional[Dict[str, Any]] = None
     oracle_meta: Optional[Dict[str, Any]] = None
+    oracle_mode = "none"  # none | rescue | recompute
 
     if should_oracle:
         oracle_used = True
+
+        # ✅ Mode choisi:
+        # - si Lovable fournit des closes => Oracle "rescue" (aucune dépendance externe)
+        # - sinon => Oracle "recompute" (tente yfinance/stooq)
+        if req.closes and len(req.closes) >= (req.lookback_days + 2):
+            oracle_mode = "rescue"
+        else:
+            oracle_mode = "recompute"
+
         try:
             oreq = OracleRequest(
                 asset_type=lovable_feats.get("asset_type") or "equity",
                 market=lovable_feats.get("market") or "US",
                 ticker=lovable_feats.get("ticker"),
-                closes=req.closes,
-                dates=req.dates,
+                closes=req.closes if oracle_mode == "rescue" else None,  # ✅ clé
+                dates=req.dates if oracle_mode == "rescue" else None,
                 lookback_days=req.lookback_days,
             )
             oracle_feats, oracle_meta = _oracle_analyze(oreq)
@@ -1121,6 +1143,7 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
             return {
                 "features_final": lovable_feats,
                 "oracle_used": True,
+                "oracle_mode": oracle_mode,
                 "oracle_failed": True,
                 "oracle_error": str(e),
                 "unsup_status": unsup_status,
@@ -1128,21 +1151,17 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
                 "integrity_flags": integrity_flags,
                 "integrity_critical_flags": integrity_critical,
                 "xgb_shadow": xgb,
-                "gating_debug": {
+                "decision_trace": {
                     "should_oracle": True,
+                    "oracle_mode": oracle_mode,
                     "reasons": reasons,
                     "warn_is_shallow": warn_is_shallow,
                     "xgb_ok_relaxes": xgb_ok_relaxes,
-                    "warn_thr": warn_thr,
-                    "ensemble": ensemble,
-                    "warn_margin": WARN_MARGIN,
-                    "xgb_ok_pblock_max": XGB_OK_PBLOCK_MAX,
-                    "unsup_missing_ratio": unsup_missing_ratio,
-                    "unsup_missing_count": unsup_missing_count,
-                    "unsup_n_cols": unsup_n_cols,
-                    "unsup_missing_cols_sample": unsup.get("missing_cols_sample", []),
-                    "unsup_max_missing_ratio": UNSUP_MAX_MISSING_RATIO,
-                    "unsup_max_missing_count": UNSUP_MAX_MISSING_COUNT,
+                    "unsup_status": unsup_status,
+                    "missing_critical": missing_critical,
+                    "integrity_critical": bool(integrity_critical),
+                    "has_closes": bool(req.closes),
+                    "closes_len": len(req.closes) if req.closes else 0,
                 },
             }
 
@@ -1151,6 +1170,7 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
     out: Dict[str, Any] = {
         "features_final": features_final,
         "oracle_used": oracle_used,
+        "oracle_mode": oracle_mode,
         "unsup_status": unsup_status,
         "missing_critical": missing_critical,
         "integrity_flags": integrity_flags,
@@ -1168,6 +1188,18 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
             "n_cols": unsup.get("n_cols"),
         },
         "xgb_shadow": xgb,
+        "decision_trace": {
+            "should_oracle": should_oracle,
+            "oracle_mode": oracle_mode,
+            "reasons": reasons,
+            "warn_is_shallow": warn_is_shallow,
+            "xgb_ok_relaxes": xgb_ok_relaxes,
+            "unsup_status": unsup_status,
+            "missing_critical": missing_critical,
+            "integrity_critical": bool(integrity_critical),
+            "has_closes": bool(req.closes),
+            "closes_len": len(req.closes) if req.closes else 0,
+        },
         "gating_debug": {
             "should_oracle": should_oracle,
             "reasons": reasons,
