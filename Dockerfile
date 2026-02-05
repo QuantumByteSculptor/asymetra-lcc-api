@@ -5,6 +5,13 @@ FROM python:3.11-slim
 # ============================
 WORKDIR /app
 
+<<<<<<< HEAD
+=======
+# Install system deps needed for:
+# - curl (download models)
+# - tar  (extract models)
+# - ca-certificates (HTTPS)
+>>>>>>> 5df424d (Oracle v1.6: GARCH, skew, kurtosis, stress VaR, Stooq fallback)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
@@ -19,6 +26,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
   && pip install --no-cache-dir -r /app/requirements.txt
 
 # ============================
+<<<<<<< HEAD
 # Download ML models (GitHub Release Asset)
 # ============================
 # Optional: set GITHUB_TOKEN in Render env vars to avoid rate limits.
@@ -35,6 +43,17 @@ RUN mkdir -p /app/models \
      https://api.github.com/repos/QuantumByteSculptor/asymetra-lcc-api/releases/assets/351136422 \
      -o /tmp/models.tar.gz \
   && (tar -tzf /tmp/models.tar.gz >/dev/null) \
+=======
+# Download ML models (GitHub Release)
+# ============================
+# This downloads models.tar.gz from GitHub Releases
+# and extracts it into /app/models/
+RUN mkdir -p /app/models \
+  && curl -L \
+     -H "Accept: application/octet-stream" \
+     https://api.github.com/repos/QuantumByteSculptor/asymetra-lcc-api/releases/assets/351136422 \
+     -o /tmp/models.tar.gz \
+>>>>>>> 5df424d (Oracle v1.6: GARCH, skew, kurtosis, stress VaR, Stooq fallback)
   && tar -xzf /tmp/models.tar.gz -C /app \
   && rm -f /tmp/models.tar.gz
 
@@ -57,8 +76,11 @@ ENV SUP_BUNDLE_PATH=/app/models/sup_bundle.joblib
 # ============================
 CMD ["python", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
+<<<<<<< HEAD
 
 
+=======
+>>>>>>> 5df424d (Oracle v1.6: GARCH, skew, kurtosis, stress VaR, Stooq fallback)
 
 
 

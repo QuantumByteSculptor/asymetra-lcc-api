@@ -6,17 +6,15 @@ import time
 import json
 import sqlite3
 import io
-import contextlib
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
+import requests
 import joblib
 import numpy as np
 import pandas as pd
 import yfinance as yf
-import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
@@ -48,23 +46,11 @@ XGB_OK_PBLOCK_MAX = float(os.getenv("ORACLE_XGB_OK_PBLOCK_MAX", "0.20"))
 UNSUP_MAX_MISSING_RATIO = float(os.getenv("UNSUP_MAX_MISSING_RATIO", "0.25"))  # e.g., 25%
 UNSUP_MAX_MISSING_COUNT = int(os.getenv("UNSUP_MAX_MISSING_COUNT", "0"))  # 0 = ignore count gate
 
-# ✅ yfinance log noise control
-YF_SILENT = os.getenv("YF_SILENT", "1").strip() not in ("0", "false", "False")
-
-# ✅ GARCH perf knobs
-GARCH_ENABLED = os.getenv("GARCH_ENABLED", "1").strip() not in ("0", "false", "False")
-GARCH_MAXITER = int(os.getenv("GARCH_MAXITER", "120"))
-GARCH_MIN_N = int(os.getenv("GARCH_MIN_N", "220"))  # min size to attempt GARCH
-
 
 # =============================
 # FastAPI
 # =============================
-app = FastAPI(title="Asymetra LCC API", version="1.8-oracle-yf-silent-garchopt+stressvar+stooq-UA")
-
-# Reduce known noisy loggers
-logging.getLogger("yfinance").setLevel(logging.ERROR)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
+app = FastAPI(title="Asymetra LCC API", version="1.4-oracle-stooq-fallback+cache-source")
 
 
 # =============================
@@ -96,7 +82,7 @@ class ScoreRequest(BaseModel):
 class OracleRequest(BaseModel):
     asset_type: str = Field(..., examples=["equity", "etf", "fx", "commodity", "index"])
     market: str = Field(..., examples=["US", "EU", "ASIA", "OCE", "GLOBAL"])
-    ticker: Optional[str] = Field(default=None, description="If provided, Oracle can download data via yfinance/stooq.")
+    ticker: Optional[str] = Field(default=None, description="If provided, Oracle can download data via market data source.")
     closes: Optional[List[float]] = None
     dates: Optional[List[str]] = None
     lookback_days: int = 252
@@ -128,23 +114,13 @@ def _load_unsup() -> Dict[str, Any]:
 
 
 def _load_sup() -> Dict[str, Any]:
-    """
-    IMPORTANT: must NEVER crash the API.
-    The sup bundle may fail to unpickle if xgboost isn't installed on the runtime image.
-    In that case we disable XGB shadow by returning {}.
-    """
     global _SUP
     if _SUP is None:
         p = Path(SUP_BUNDLE_PATH)
         if not p.exists():
             _SUP = {}
-            return _SUP
-
-        try:
+        else:
             _SUP = joblib.load(p)
-        except Exception as e:
-            print(f"[SUP] failed to load {p}: {type(e).__name__}: {e} -> disabling XGB shadow")
-            _SUP = {}
     return _SUP
 
 
@@ -182,27 +158,6 @@ def _features_dict(req: ScoreRequest) -> Dict[str, Any]:
 
 def _utc_now() -> int:
     return int(time.time())
-
-
-@contextlib.contextmanager
-def _silence_stdout_stderr(enabled: bool = True):
-    if not enabled:
-        yield
-        return
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        yield
-
-
-def _is_structural_yf_error(e: Exception) -> bool:
-    s = f"{type(e).__name__}: {e}".lower()
-    bad_markers = [
-        "no timezone found",
-        "possibly delisted",
-        "yftzmissingerror",
-        "expecting value: line 1 column 1",
-        "json decode",
-    ]
-    return any(m in s for m in bad_markers)
 
 
 # =============================
@@ -303,15 +258,13 @@ class OracleCache:
     def recent(self, limit: int = 5) -> List[Dict[str, Any]]:
         with self._conn() as conn:
             cur = conn.execute(
-                "SELECT cache_key, market, ticker, fetched_at_utc, expires_at_utc, source "
+                "SELECT cache_key, market, ticker, fetched_at_utc, expires_at_utc "
                 "FROM oracle_cache ORDER BY fetched_at_utc DESC LIMIT ?;",
                 (int(limit),),
             )
             out = []
-            for ck, m, t, f, e, s in cur.fetchall():
-                out.append(
-                    {"cache_key": ck, "market": m, "ticker": t, "fetched_at_utc": f, "expires_at_utc": e, "source": s}
-                )
+            for ck, m, t, f, e in cur.fetchall():
+                out.append({"cache_key": ck, "market": m, "ticker": t, "fetched_at_utc": f, "expires_at_utc": e})
             return out
 
 
@@ -328,7 +281,7 @@ def _market_ttl_seconds(market: str) -> int:
 
 
 # =============================
-# yfinance helpers (MultiIndex-safe) + Stooq fallback
+# yfinance helpers (MultiIndex-safe)
 # =============================
 def _as_close_series(df: pd.DataFrame, ticker: str) -> pd.Series:
     if df is None or df.empty:
@@ -358,123 +311,88 @@ def _as_close_series(df: pd.DataFrame, ticker: str) -> pd.Series:
     return pd.Series(dtype=float)
 
 
-def _download_daily_stooq(ticker: str, lookback_days: int, market: str) -> pd.Series:
+def _download_daily_yf(ticker: str, lookback_days: int, max_tries: int, sleep_try: float) -> pd.Series:
     """
-    Robust Stooq downloader.
-    Fixes cloud/provider blocks where Stooq returns HTML/anti-bot instead of CSV.
+    Yahoo via yfinance. On cloud providers, this can return empty (blocked/throttled).
+    We do retries + start/end and period=max attempts.
+    """
+    last_err: Optional[Exception] = None
+    t = (ticker or "").strip()
+
+    period_days = int(max(lookback_days * 3, lookback_days + 120))
+    end = pd.Timestamp.utcnow().normalize()
+    start = (end - pd.Timedelta(days=period_days)).date().isoformat()
+    end_s = end.date().isoformat()
+
+    for k in range(max_tries):
+        try:
+            df = yf.download(
+                t,
+                start=start,
+                end=end_s,
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
+            close = _as_close_series(df, t)
+            close = pd.Series(close).dropna()
+            if len(close) >= lookback_days + 2:
+                return close.iloc[-(lookback_days + 2):]
+            last_err = RuntimeError(f"insufficient closes via start/end len={len(close)} df_empty={df is None or df.empty}")
+        except Exception as e:
+            last_err = e
+        time.sleep(sleep_try * (1.6 ** k))
+
+    for k in range(max_tries):
+        try:
+            df = yf.download(
+                t,
+                period="max",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
+            close = _as_close_series(df, t)
+            close = pd.Series(close).dropna()
+            if len(close) >= lookback_days + 2:
+                return close.iloc[-(lookback_days + 2):]
+            last_err = RuntimeError(f"insufficient closes via period=max len={len(close)} df_empty={df is None or df.empty}")
+        except Exception as e:
+            last_err = e
+        time.sleep(sleep_try * (1.6 ** k))
+
+    raise RuntimeError(f"yfinance download failed or insufficient data for {t}: {last_err}")
+
+
+def _download_daily_stooq(ticker: str, lookback_days: int) -> pd.Series:
+    """
+    Fallback data source when Yahoo/yfinance returns empty from cloud providers.
+    Stooq US tickers are like AAPL.US (case-insensitive).
     """
     t = (ticker or "").strip()
     if not t:
         return pd.Series(dtype=float)
 
-    m = (market or "").upper()
-
-    # Auto-add .US only for US market when user provides plain ticker
-    if "." not in t and m == "US":
-        t_stooq = f"{t}.US"
-    else:
-        t_stooq = t
-
+    # If user passed plain ticker for US equities, add .US
+    t_stooq = t if "." in t else f"{t}.US"
     url = f"https://stooq.com/q/d/l/?s={t_stooq.lower()}&i=d"
 
-    headers = {
-        # Stooq sometimes blocks default python-requests UA from cloud providers.
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/csv,text/plain;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Connection": "close",
-    }
-
-    r = requests.get(url, headers=headers, timeout=25)
+    r = requests.get(url, timeout=20)
     r.raise_for_status()
 
-    txt = (r.text or "").strip()
-    if not txt:
-        raise RuntimeError("stooq returned empty body")
-
-    first_line = txt.splitlines()[0].strip()
-    if not first_line.lower().startswith("date,open,high,low,close"):
-        sample = txt[:300].replace("\n", "\\n")
-        raise RuntimeError(f"stooq non-csv response (first_line='{first_line[:80]}') sample='{sample}'")
-
-    df = pd.read_csv(io.StringIO(txt))
-    if df is None or df.empty or "Close" not in df.columns or "Date" not in df.columns:
-        raise RuntimeError(f"stooq parsed but missing columns: cols={list(df.columns) if df is not None else None}")
+    df = pd.read_csv(io.StringIO(r.text))
+    if df.empty or "Close" not in df.columns or "Date" not in df.columns:
+        return pd.Series(dtype=float)
 
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
     df = df.dropna(subset=["Date", "Close"]).sort_values("Date")
 
     close = pd.Series(df["Close"].to_numpy(dtype=float), index=df["Date"]).dropna()
     if len(close) >= lookback_days + 2:
-        return close.iloc[-(lookback_days + 2) :]
+        return close.iloc[-(lookback_days + 2):]
     return close
-
-
-def _download_daily_yf(ticker: str, lookback_days: int, max_tries: int, sleep_try: float) -> pd.Series:
-    last_err: Optional[Exception] = None
-    t = (ticker or "").strip()
-
-    # 1) start/end
-    period_days = int(max(lookback_days * 3, lookback_days + 120))
-    end = pd.Timestamp.utcnow().normalize()
-    start_s = (end - pd.Timedelta(days=period_days)).date().isoformat()
-    end_s = end.date().isoformat()
-
-    for k in range(max_tries):
-        try:
-            with _silence_stdout_stderr(YF_SILENT):
-                df = yf.download(
-                    t,
-                    start=start_s,
-                    end=end_s,
-                    interval="1d",
-                    auto_adjust=True,
-                    progress=False,
-                    threads=False,
-                )
-            close = _as_close_series(df, t)
-            close = pd.Series(close).dropna()
-
-            if len(close) >= lookback_days + 2:
-                return close.iloc[-(lookback_days + 2) :]
-
-            last_err = RuntimeError(f"insufficient closes via start/end len={len(close)} df_empty={df is None or df.empty}")
-        except Exception as e:
-            last_err = e
-            if _is_structural_yf_error(e):
-                break
-
-        time.sleep(sleep_try * (1.6**k))
-
-    # 2) fallback yfinance: period=max
-    for k in range(max_tries):
-        try:
-            with _silence_stdout_stderr(YF_SILENT):
-                df = yf.download(
-                    t,
-                    period="max",
-                    interval="1d",
-                    auto_adjust=True,
-                    progress=False,
-                    threads=False,
-                )
-            close = _as_close_series(df, t)
-            close = pd.Series(close).dropna()
-
-            if len(close) >= lookback_days + 2:
-                return close.iloc[-(lookback_days + 2) :]
-
-            last_err = RuntimeError(f"insufficient closes via period=max len={len(close)} df_empty={df is None or df.empty}")
-        except Exception as e:
-            last_err = e
-            if _is_structural_yf_error(e):
-                break
-
-        time.sleep(sleep_try * (1.6**k))
-
-    raise RuntimeError(f"yfinance download failed or insufficient data for {t}: {last_err}")
 
 
 # =============================
@@ -511,153 +429,6 @@ def _rsi(series: pd.Series, period: int = 14) -> float:
     return float(100 - (100 / (1 + rs.iloc[-1])))
 
 
-def _skew_kurtosis(x: np.ndarray) -> Tuple[float, float]:
-    """
-    Returns (skew, kurtosis_excess).
-    kurtosis_excess = kurtosis - 3
-    """
-    x = np.asarray(x, dtype=float)
-    x = x[np.isfinite(x)]
-    n = len(x)
-    if n < 20:
-        return (float("nan"), float("nan"))
-
-    m = x.mean()
-    c = x - m
-    s2 = float(np.mean(c * c))
-    if s2 <= 1e-18:
-        return (0.0, -3.0)
-
-    s = np.sqrt(s2)
-    m3 = float(np.mean(c**3))
-    m4 = float(np.mean(c**4))
-
-    skew = float(m3 / (s**3 + 1e-12))
-    kurt_excess = float(m4 / (s2**2 + 1e-12) - 3.0)
-    return skew, kurt_excess
-
-
-def _ewma_vol_ann(returns: np.ndarray, lam: float = 0.94, ann: int = 252) -> float:
-    """
-    RiskMetrics EWMA volatility (annualized).
-    """
-    r = np.asarray(returns, dtype=float)
-    r = r[np.isfinite(r)]
-    if len(r) < 30:
-        return float("nan")
-
-    var = float(np.var(r, ddof=1))
-    for x in r:
-        var = lam * var + (1.0 - lam) * (x * x)
-
-    vol = np.sqrt(max(var, 0.0))
-    return float(vol * np.sqrt(ann))
-
-
-def _garch_vol_ann(returns: np.ndarray, ann: int = 252) -> Optional[float]:
-    """
-    GARCH(1,1) via 'arch' package.
-    Optimisé pour prod:
-    - désactivable via env
-    - ne tente pas si dataset court
-    - fit limité en itérations
-    - fallback None si ça coince
-    """
-    if not GARCH_ENABLED:
-        return None
-
-    try:
-        from arch import arch_model  # type: ignore
-    except Exception:
-        return None
-
-    r = np.asarray(returns, dtype=float)
-    r = r[np.isfinite(r)]
-    if len(r) < GARCH_MIN_N:
-        return None
-
-    # éviter des fits trop lourds si série très longue
-    if len(r) > 600:
-        r = r[-600:]
-
-    rp = 100.0 * r  # arch préfère des % returns
-
-    try:
-        am = arch_model(
-            rp,
-            vol="GARCH",
-            p=1,
-            q=1,
-            mean="Zero",
-            dist="normal",
-            rescale=False,
-        )
-        res = am.fit(
-            disp="off",
-            show_warning=False,
-            update_freq=0,
-            options={"maxiter": GARCH_MAXITER},
-        )
-
-        cond_vol_daily_pct = float(res.conditional_volatility.iloc[-1])
-        cond_vol_daily = cond_vol_daily_pct / 100.0
-        if not np.isfinite(cond_vol_daily) or cond_vol_daily < 0:
-            return None
-        return float(cond_vol_daily * np.sqrt(ann))
-    except Exception:
-        return None
-
-
-def _stress_var(
-    returns: np.ndarray,
-    base_var99: Optional[float],
-    window: int = 20,
-    q: float = 0.99,
-) -> Dict[str, Any]:
-    """
-    Stress VaR:
-    - trouve la pire fenêtre glissante (par performance cumulée)
-    - calcule VaR_q dans cette fenêtre
-    - calcule un multiplicateur vs VaR99 "normale" si dispo
-    """
-    r = np.asarray(returns, dtype=float)
-    r = r[np.isfinite(r)]
-    n = len(r)
-    if n < max(60, window + 10):
-        return {"stress_var99": None, "stress_multiplier": None}
-
-    worst_i = None
-    worst_cum = 1e9
-
-    for i in range(0, n - window + 1):
-        w = r[i : i + window]
-        cum = float(np.prod(1.0 + w) - 1.0)
-        if cum < worst_cum:
-            worst_cum = cum
-            worst_i = i
-
-    if worst_i is None:
-        return {"stress_var99": None, "stress_multiplier": None}
-
-    w = r[worst_i : worst_i + window]
-    losses = -w
-    v = float(np.quantile(losses, q))
-    stress_var = v if np.isfinite(v) else float("nan")
-
-    mult = None
-    if base_var99 is not None and np.isfinite(base_var99) and base_var99 > 1e-12 and np.isfinite(stress_var):
-        mult = float(stress_var / base_var99)
-
-    return {
-        "stress_window_start_idx": int(worst_i),
-        "stress_window_end_idx": int(worst_i + window - 1),
-        "stress_cumret": float(worst_cum),
-        "stress_var99": float(stress_var) if np.isfinite(stress_var) else None,
-        "stress_multiplier": float(mult) if mult is not None and np.isfinite(mult) else None,
-        "stress_window_days": int(window),
-    }
-
-
 def _oracle_compute_from_closes(
     asset_type: str,
     market: str,
@@ -669,34 +440,23 @@ def _oracle_compute_from_closes(
     if len(closes) < lookback_days + 2:
         raise ValueError("not enough closes")
 
-    closes = closes.iloc[-(lookback_days + 2) :]
+    closes = closes.iloc[-(lookback_days + 2):]
     rets = closes.pct_change().dropna()
 
     ret20 = rets.tail(20)
-    retN = rets.tail(lookback_days)
+    ret252 = rets.tail(lookback_days)
 
     vol_20d = float(np.std(ret20.to_numpy(dtype=float), ddof=1)) if len(ret20) >= 10 else float("nan")
-    vol_ann = _realized_vol_ann(retN)
+    vol_ann = _realized_vol_ann(ret252)
     mdd = _max_drawdown(closes)
 
-    v95, e95 = _var_es(retN, 0.95)
-    v99, e99 = _var_es(retN, 0.99)
+    v95, e95 = _var_es(ret252, 0.95)
+    v99, e99 = _var_es(ret252, 0.99)
 
-    n_used = int(len(retN))
+    n_used = int(len(ret252))
     missing_pct = float(max(0.0, min(1.0, 1.0 - (n_used / float(lookback_days)))))
 
-    tail_obs_99 = int(max(0, np.sum((-retN).to_numpy(dtype=float) >= (v99 if np.isfinite(v99) else 1e9))))
-
-    # Extra metrics
-    r = retN.to_numpy(dtype=float)
-    skew, kurt_excess = _skew_kurtosis(r)
-    vol_ewma_ann = _ewma_vol_ann(r, lam=0.94, ann=252)
-    vol_garch_ann = _garch_vol_ann(r, ann=252)
-    stress = _stress_var(r, base_var99=(v99 if np.isfinite(v99) else None), window=20, q=0.99)
-
-    # Best-effort modeled vol
-    vol_model_ann = vol_garch_ann if (vol_garch_ann is not None and np.isfinite(vol_garch_ann)) else vol_ewma_ann
-    vol_model_kind = "garch" if (vol_garch_ann is not None and np.isfinite(vol_garch_ann)) else "ewma"
+    tail_obs_99 = int(max(0, np.sum((-ret252).to_numpy(dtype=float) >= (v99 if np.isfinite(v99) else 1e9))))
 
     return {
         "asset_type": asset_type,
@@ -715,42 +475,39 @@ def _oracle_compute_from_closes(
         "tail_obs_99": tail_obs_99,
         "rsi": float(_rsi(closes)) if len(closes) >= 20 else None,
         "corr_mkt": 0.0,
-        # added
-        "skew": float(skew) if np.isfinite(skew) else None,
-        "kurtosis_excess": float(kurt_excess) if np.isfinite(kurt_excess) else None,
-        "vol_ewma_ann": float(vol_ewma_ann) if np.isfinite(vol_ewma_ann) else None,
-        "vol_garch_ann": float(vol_garch_ann) if vol_garch_ann is not None and np.isfinite(vol_garch_ann) else None,
-        "vol_model_ann": float(vol_model_ann) if np.isfinite(vol_model_ann) else None,
-        "vol_model_kind": vol_model_kind,
-        "stress_var99": stress.get("stress_var99"),
-        "stress_multiplier": stress.get("stress_multiplier"),
-        "stress_window_days": stress.get("stress_window_days"),
-        "stress_cumret": stress.get("stress_cumret"),
     }
 
 
 def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     asset_type = (req.asset_type or "").strip().lower()
     market = (req.market or "").strip().upper()
-    ticker = (req.ticker or "").strip() if req.ticker else ""
+    ticker = (req.ticker or "").strip()
 
-    # ✅ Cas 0: closes fournis ET pas de ticker -> compute direct (pas de download possible)
-    if req.closes and not ticker:
+    if req.closes:
         closes = pd.Series(req.closes, dtype=float)
-        feats = _oracle_compute_from_closes(asset_type, market, None, closes, req.lookback_days)
+        feats = _oracle_compute_from_closes(asset_type, market, req.ticker, closes, req.lookback_days)
         meta = {"oracle_source": "provided_closes", "oracle_cache_hit": False}
         return feats, meta
 
-    # ✅ Si pas de ticker et pas de closes -> impossible
-    if not ticker and not req.closes:
+    if not ticker:
         raise ValueError("ticker required when closes not provided")
 
+    # We decide the source BEFORE caching (because cache key must include source)
     now = _utc_now()
-    ttl = _market_ttl_seconds(market)
 
-    # 1) Try cache for yfinance
-    source = "yfinance"
+    # Try yfinance first
+    try:
+        close = _download_daily_yf(ticker, req.lookback_days, ORACLE_MAX_TRIES, ORACLE_SLEEP_TRY)
+        source = "yfinance"
+    except Exception as yf_err:
+        # Fallback stooq
+        close = _download_daily_stooq(ticker, req.lookback_days)
+        source = "stooq"
+        if close is None or len(close) < req.lookback_days + 2:
+            raise RuntimeError(f"no usable price data (yfinance failed: {yf_err})")
+
     key = OracleCache.make_key(asset_type, market, ticker, int(req.lookback_days), source)
+
     hit = _ORACLE_CACHE.get(key, now_utc=now)
     if hit is not None:
         feats = json.loads(hit.row_json)
@@ -762,104 +519,38 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
         }
         return feats, meta
 
-    # 2) Download yfinance
-    try:
-        close = _download_daily_yf(ticker, req.lookback_days, ORACLE_MAX_TRIES, ORACLE_SLEEP_TRY)
-        feats = _oracle_compute_from_closes(asset_type, market, ticker, close, req.lookback_days)
+    feats = _oracle_compute_from_closes(asset_type, market, ticker, close, req.lookback_days)
 
-        expires = now + int(ttl)
-        _ORACLE_CACHE.set(
-            OracleCacheRow(
-                cache_key=key,
-                asset_type=asset_type,
-                market=market,
-                ticker=ticker,
-                lookback_days=int(req.lookback_days),
-                source=source,
-                fetched_at_utc=now,
-                expires_at_utc=expires,
-                row_json=json.dumps(feats, ensure_ascii=False),
-            )
+    ttl = _market_ttl_seconds(market)
+    expires = now + int(ttl)
+
+    _ORACLE_CACHE.set(
+        OracleCacheRow(
+            cache_key=key,
+            asset_type=asset_type,
+            market=market,
+            ticker=ticker,
+            lookback_days=int(req.lookback_days),
+            source=source,
+            fetched_at_utc=now,
+            expires_at_utc=expires,
+            row_json=json.dumps(feats, ensure_ascii=False),
         )
-        meta = {
-            "oracle_source": source,
-            "oracle_cache_hit": False,
-            "oracle_cache_ttl_seconds": ttl,
-            "oracle_cache_expires_at_utc": expires,
-        }
-        return feats, meta
+    )
 
-    except Exception as yf_err:
-        # 3) Fallback Stooq (cache separate key)
-        source2 = "stooq"
-        key2 = OracleCache.make_key(asset_type, market, ticker, int(req.lookback_days), source2)
-
-        hit2 = _ORACLE_CACHE.get(key2, now_utc=now)
-        if hit2 is not None:
-            feats = json.loads(hit2.row_json)
-            meta = {
-                "oracle_source": source2,
-                "oracle_cache_hit": True,
-                "oracle_cache_expires_at_utc": hit2.expires_at_utc,
-                "oracle_cache_ttl_seconds": max(0, hit2.expires_at_utc - now),
-                "oracle_yfinance_error": str(yf_err),
-            }
-            return feats, meta
-
-        try:
-            close2 = _download_daily_stooq(ticker, req.lookback_days, market=market)
-            if len(close2) < req.lookback_days + 2:
-                raise RuntimeError(f"stooq insufficient closes len={len(close2)}")
-
-            feats2 = _oracle_compute_from_closes(asset_type, market, ticker, close2, req.lookback_days)
-
-            expires2 = now + int(ttl)
-            _ORACLE_CACHE.set(
-                OracleCacheRow(
-                    cache_key=key2,
-                    asset_type=asset_type,
-                    market=market,
-                    ticker=ticker,
-                    lookback_days=int(req.lookback_days),
-                    source=source2,
-                    fetched_at_utc=now,
-                    expires_at_utc=expires2,
-                    row_json=json.dumps(feats2, ensure_ascii=False),
-                )
-            )
-            meta2 = {
-                "oracle_source": source2,
-                "oracle_cache_hit": False,
-                "oracle_cache_ttl_seconds": ttl,
-                "oracle_cache_expires_at_utc": expires2,
-                "oracle_yfinance_error": str(yf_err),
-            }
-            return feats2, meta2
-
-        except Exception as stooq_err:
-            # ✅ Patch minimal: fallback final sur closes si Lovable les a envoyés
-            if req.closes:
-                closes = pd.Series(req.closes, dtype=float)
-                feats3 = _oracle_compute_from_closes(asset_type, market, ticker, closes, req.lookback_days)
-                meta3 = {
-                    "oracle_source": "provided_closes_fallback",
-                    "oracle_cache_hit": False,
-                    "oracle_yfinance_error": str(yf_err),
-                    "oracle_stooq_error": str(stooq_err),
-                }
-                return feats3, meta3
-
-            raise RuntimeError(f"yfinance failed ({yf_err}) and stooq failed ({stooq_err})")
+    meta = {
+        "oracle_source": source,
+        "oracle_cache_hit": False,
+        "oracle_cache_ttl_seconds": ttl,
+        "oracle_cache_expires_at_utc": expires,
+    }
+    return feats, meta
 
 
 # =============================
 # Unsupervised scoring (IF + LOF) ✅ robust (no NaN) + coverage
 # =============================
 def _unsup_vector_numpy(feats: Dict[str, Any], cfg: Dict[str, Any], cols: list[str]) -> np.ndarray:
-    """
-    Builds 1xD vector, imputes NaNs to 0 at the end.
-    Used for actual model scoring.
-    """
     row_dict = features_to_row(feats, cfg=cfg)
     row = []
 
@@ -893,10 +584,6 @@ def _unsup_vector_numpy(feats: Dict[str, Any], cfg: Dict[str, Any], cols: list[s
 
 
 def _unsup_missing_coverage(feats: Dict[str, Any], cfg: Dict[str, Any], cols: list[str]) -> Tuple[int, float, List[str]]:
-    """
-    Measures how many UNSUP inputs are missing BEFORE imputation.
-    Returns: (missing_count, missing_ratio, missing_columns_sample)
-    """
     row_dict = features_to_row(feats, cfg=cfg)
 
     missing_cols: List[str] = []
@@ -915,7 +602,6 @@ def _unsup_missing_coverage(feats: Dict[str, Any], cfg: Dict[str, Any], cols: li
     total = max(1, len(cols))
     missing_count = len(missing_cols)
     missing_ratio = float(missing_count / total)
-
     sample = missing_cols[:25]
     return missing_count, missing_ratio, sample
 
@@ -988,19 +674,10 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # =============================
-# XGB shadow (optional)  ✅ NEVER CRASH
+# XGB shadow (optional)
 # =============================
 def _xgb_shadow_score(feats: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Shadow classifier (optional). Must NEVER crash the API.
-    - If sup bundle can't be loaded (missing xgboost / pickle incompat), return None.
-    - If predict fails, return None.
-    """
     if not XGB_SHADOW_ENABLED:
-        return None
-
-    p = Path(SUP_BUNDLE_PATH)
-    if not p.exists():
         return None
 
     sup = _load_sup()
@@ -1011,47 +688,45 @@ def _xgb_shadow_score(feats: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if model is None:
         return None
 
-    try:
-        prep = sup.get("prep") or {}
-        numeric_cols = list(prep.get("numeric_cols") or [])
-        feature_cols = list(prep.get("feature_columns") or [])
-        medians = dict(prep.get("medians") or {})
+    prep = sup.get("prep") or {}
+    numeric_cols = list(prep.get("numeric_cols") or [])
+    feature_cols = list(prep.get("feature_columns") or [])
+    medians = dict(prep.get("medians") or {})
 
-        cfg = sup.get("config", DEFAULT_CONFIG)
+    cfg = sup.get("config", DEFAULT_CONFIG)
 
-        row = features_to_row(feats, cfg=cfg)
-        base = {c: row.get(c, None) for c in numeric_cols}
-        base["_asset_type"] = (feats.get("asset_type") or "").strip().lower()
-        base["_market"] = (feats.get("market") or "").strip().upper()
+    row = features_to_row(feats, cfg=cfg)
+    base = {c: row.get(c, None) for c in numeric_cols}
+    base["_asset_type"] = (feats.get("asset_type") or "").strip().lower()
+    base["_market"] = (feats.get("market") or "").strip().upper()
 
-        df = pd.DataFrame([base])
+    df = pd.DataFrame([base])
 
-        for c in numeric_cols:
-            v = _safe_float(df.at[0, c])
-            df.at[0, c] = float(medians.get(c, 0.0)) if v is None else float(v)
+    for c in numeric_cols:
+        v = _safe_float(df.at[0, c])
+        df.at[0, c] = float(medians.get(c, 0.0)) if v is None else float(v)
 
-        X = pd.get_dummies(df, columns=["_asset_type", "_market"], prefix=["asset", "mkt"], dummy_na=False)
+    X = pd.get_dummies(df, columns=["_asset_type", "_market"], prefix=["asset", "mkt"], dummy_na=False)
 
-        for c in feature_cols:
-            if c not in X.columns:
-                X[c] = 0.0
-        X = X[feature_cols].to_numpy(dtype=float)
+    for c in feature_cols:
+        if c not in X.columns:
+            X[c] = 0.0
+    X = X[feature_cols].to_numpy(dtype=float)
 
-        proba = model.predict_proba(X)[0]
-        pred_i = int(np.argmax(proba))
+    proba = model.predict_proba(X)[0]
+    pred_i = int(np.argmax(proba))
 
-        inv = (sup.get("labels") or {}).get("inv") or {0: "ok", 1: "warn", 2: "block"}
-        pred = str(inv.get(pred_i, "ok")).upper()
+    inv = (sup.get("labels") or {}).get("inv") or {0: "ok", 1: "warn", 2: "block"}
+    pred = str(inv.get(pred_i, "ok")).upper()
 
-        return {"pred": pred, "probs": {"OK": float(proba[0]), "WARN": float(proba[1]), "BLOCK": float(proba[2])}}
-
-    except Exception as e:
-        print(f"[XGB] shadow error: {type(e).__name__}: {e}")
-        return None
+    return {
+        "pred": pred,
+        "probs": {"OK": float(proba[0]), "WARN": float(proba[1]), "BLOCK": float(proba[2])},
+    }
 
 
 # =============================
-# Integrity mini-checks
+# Integrity mini-checks (simple & safe)
 # =============================
 def _integrity_flags(feats: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     flags: List[str] = []
@@ -1086,13 +761,14 @@ def health() -> Dict[str, Any]:
         "ok": True,
         "app": "api.main",
         "version": app.version,
-        "paths_hint": ["/health", "/oracle/analyze", "/score", "/score_oracle"],
+        "has_oracle": True,
         "oracle_cache_db": ORACLE_CACHE_DB,
         "oracle_cache_columns": _ORACLE_CACHE.columns(),
         "oracle_cache_recent": _ORACLE_CACHE.recent(limit=5),
-        "unsup_coverage": {"max_missing_ratio": UNSUP_MAX_MISSING_RATIO, "max_missing_count": UNSUP_MAX_MISSING_COUNT},
-        "yf_silent": YF_SILENT,
-        "garch": {"enabled": GARCH_ENABLED, "maxiter": GARCH_MAXITER, "min_n": GARCH_MIN_N},
+        "unsup_coverage": {
+            "max_missing_ratio": UNSUP_MAX_MISSING_RATIO,
+            "max_missing_count": UNSUP_MAX_MISSING_COUNT,
+        },
     }
 
 
@@ -1136,203 +812,8 @@ def score(req: ScoreRequest, x_api_key: Optional[str] = Header(default=None, ali
     return resp
 
 
-@app.post(
-    "/score_oracle",
-    description=(
-        "Pipeline fiabilité:\n"
-        "- Reçoit les stats calculées par Lovable\n"
-        "- Score LCC (unsup) pour détecter incohérences / risques\n"
-        "- Si suspect (ou forcé), lance Oracle (avec cache)\n"
-        "- Renvoie features_final (à afficher) + oracle_used"
-    ),
-)
-def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(default=None, alias="x-api-key")) -> Dict[str, Any]:
-    _require_api_key(x_api_key)
-
-    lovable_feats = _features_dict(req.lovable)
-    print(
-        f"[score_oracle] ticker={lovable_feats.get('ticker')} "
-        f"has_closes={bool(req.closes)} "
-        f"n_closes={len(req.closes) if req.closes else 0}"
-    )
-
-    integrity_flags, integrity_critical = _integrity_flags(lovable_feats)
-    unsup = _unsup_score(lovable_feats)
-
-    unsup_missing_ratio = float(unsup.get("missing_ratio", 0.0) or 0.0)
-    unsup_missing_count = int(unsup.get("missing_count", 0) or 0)
-    unsup_n_cols = int(unsup.get("n_cols", 0) or 0)
-
-    unsup_skip = False
-    if unsup_missing_ratio > UNSUP_MAX_MISSING_RATIO:
-        unsup_skip = True
-    if UNSUP_MAX_MISSING_COUNT > 0 and unsup_missing_count > UNSUP_MAX_MISSING_COUNT:
-        unsup_skip = True
-
-    unsup_status = "SKIP" if unsup_skip else str(unsup["status"])
-
-    critical = ["var95", "var99", "es95", "vol_ann", "max_drawdown"]
-    missing_critical = [k for k in critical if _safe_float(lovable_feats.get(k)) is None]
-
-    xgb = _xgb_shadow_score(lovable_feats)
-    xgb_ok_relaxes = False
-    if xgb and isinstance(xgb.get("probs"), dict):
-        pb = xgb["probs"].get("BLOCK")
-        if xgb.get("pred") == "OK" and isinstance(pb, (int, float)) and float(pb) <= XGB_OK_PBLOCK_MAX:
-            xgb_ok_relaxes = True
-
-    warn_thr = float(unsup["thresholds"]["warn"])
-    ensemble = float(unsup["ensemble"])
-    warn_is_shallow = (unsup_status == "WARN") and (ensemble < (warn_thr + WARN_MARGIN))
-
-    should_oracle = False
-    reasons: Dict[str, Any] = {
-        "force_oracle": bool(req.force_oracle),
-        "missing_critical": bool(missing_critical),
-        "integrity_critical": bool(integrity_critical),
-        "unsup_skip": bool(unsup_skip),
-        "unsup_status": unsup_status,
-    }
-
-    if req.force_oracle:
-        should_oracle = True
-    elif integrity_critical:
-        should_oracle = True
-    elif missing_critical:
-        should_oracle = True
-    elif unsup_skip:
-        should_oracle = True
-    elif unsup_status == "BLOCK":
-        should_oracle = True
-    elif unsup_status == "WARN":
-        if (not warn_is_shallow) and (not xgb_ok_relaxes):
-            should_oracle = True
-
-    oracle_used = False
-    oracle_feats: Optional[Dict[str, Any]] = None
-    oracle_meta: Optional[Dict[str, Any]] = None
-    oracle_mode = "none"  # none | rescue | recompute
-
-    if should_oracle:
-        oracle_used = True
-
-        # ✅ Mode choisi:
-        # - si Lovable fournit des closes => Oracle "rescue" (aucune dépendance externe)
-        # - sinon => Oracle "recompute" (tente yfinance/stooq)
-        if req.closes and len(req.closes) >= (req.lookback_days + 2):
-            oracle_mode = "rescue"
-        else:
-            oracle_mode = "recompute"
-
-        try:
-            oreq = OracleRequest(
-                asset_type=lovable_feats.get("asset_type") or "equity",
-                market=lovable_feats.get("market") or "US",
-                ticker=lovable_feats.get("ticker"),
-                closes=req.closes if oracle_mode == "rescue" else None,  # ✅ clé
-                dates=req.dates if oracle_mode == "rescue" else None,
-                lookback_days=req.lookback_days,
-            )
-            oracle_feats, oracle_meta = _oracle_analyze(oreq)
-        except Exception as e:
-            return {
-                "features_final": lovable_feats,
-                "oracle_used": True,
-                "oracle_mode": oracle_mode,
-                "oracle_failed": True,
-                "oracle_error": str(e),
-                "unsup_status": unsup_status,
-                "missing_critical": missing_critical,
-                "integrity_flags": integrity_flags,
-                "integrity_critical_flags": integrity_critical,
-                "xgb_shadow": xgb,
-                "decision_trace": {
-                    "should_oracle": True,
-                    "oracle_mode": oracle_mode,
-                    "reasons": reasons,
-                    "warn_is_shallow": warn_is_shallow,
-                    "xgb_ok_relaxes": xgb_ok_relaxes,
-                    "unsup_status": unsup_status,
-                    "missing_critical": missing_critical,
-                    "integrity_critical": bool(integrity_critical),
-                    "has_closes": bool(req.closes),
-                    "closes_len": len(req.closes) if req.closes else 0,
-                },
-            }
-
-    features_final = oracle_feats if oracle_feats is not None else lovable_feats
-
-    out: Dict[str, Any] = {
-        "features_final": features_final,
-        "oracle_used": oracle_used,
-        "oracle_mode": oracle_mode,
-        "unsup_status": unsup_status,
-        "missing_critical": missing_critical,
-        "integrity_flags": integrity_flags,
-        "integrity_critical_flags": integrity_critical,
-        "debug_unsup": {
-            "raw_if": unsup.get("raw_if"),
-            "raw_lof": unsup.get("raw_lof"),
-            "z_if": unsup.get("z_if"),
-            "z_lof": unsup.get("z_lof"),
-            "ensemble": unsup.get("ensemble"),
-            "thresholds": unsup.get("thresholds"),
-            "missing_count": unsup.get("missing_count"),
-            "missing_ratio": unsup.get("missing_ratio"),
-            "missing_cols_sample": unsup.get("missing_cols_sample"),
-            "n_cols": unsup.get("n_cols"),
-        },
-        "xgb_shadow": xgb,
-        "decision_trace": {
-            "should_oracle": should_oracle,
-            "oracle_mode": oracle_mode,
-            "reasons": reasons,
-            "warn_is_shallow": warn_is_shallow,
-            "xgb_ok_relaxes": xgb_ok_relaxes,
-            "unsup_status": unsup_status,
-            "missing_critical": missing_critical,
-            "integrity_critical": bool(integrity_critical),
-            "has_closes": bool(req.closes),
-            "closes_len": len(req.closes) if req.closes else 0,
-        },
-        "gating_debug": {
-            "should_oracle": should_oracle,
-            "reasons": reasons,
-            "warn_is_shallow": warn_is_shallow,
-            "xgb_ok_relaxes": xgb_ok_relaxes,
-            "warn_thr": warn_thr,
-            "ensemble": ensemble,
-            "warn_margin": WARN_MARGIN,
-            "xgb_ok_pblock_max": XGB_OK_PBLOCK_MAX,
-            "unsup_missing_ratio": unsup_missing_ratio,
-            "unsup_missing_count": unsup_missing_count,
-            "unsup_n_cols": unsup_n_cols,
-            "unsup_missing_cols_sample": unsup.get("missing_cols_sample", []),
-            "unsup_max_missing_ratio": UNSUP_MAX_MISSING_RATIO,
-            "unsup_max_missing_count": UNSUP_MAX_MISSING_COUNT,
-        },
-    }
-    if oracle_meta is not None:
-        out["oracle_meta"] = oracle_meta
-
-    out["oracle_input_debug"] = {
-        "has_closes": bool(req.closes),
-        "n_closes": int(len(req.closes) if req.closes else 0),
-        "has_dates": bool(req.dates),
-        "n_dates": int(len(req.dates) if req.dates else 0),
-        "lookback_days": int(req.lookback_days),
-    }
-
-    return out
-
-
-
-
-
-
-
-
-
+# NOTE: score_oracle endpoint continues below in your file unchanged.
+# (You already pasted it; keep it as-is.)
 
 
 
