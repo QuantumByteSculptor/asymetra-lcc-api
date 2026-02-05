@@ -312,33 +312,96 @@ def _as_close_series(df: pd.DataFrame, ticker: str) -> pd.Series:
     return pd.Series(dtype=float)
 
 
-def _download_daily_yf(ticker: str, lookback_days: int, max_tries: int, sleep_try: float) -> pd.Series:
-    last_err = None
-    period_days = int(max(lookback_days * 2, lookback_days + 60))
+def _download_daily_yf(
+    ticker: str,
+    lookback_days: int,
+    max_tries: int,
+    sleep_try: float,
+) -> pd.Series:
+    """
+    Télécharge des prix daily via yfinance de façon robuste.
+
+    Stratégie :
+    1) Tentatives avec start/end explicites (le plus propre)
+    2) Fallback avec period="max" (Yahoo est parfois capricieux sur start/end)
+    3) Toujours garantir >= lookback_days + 2 closes
+    """
+
+    last_err: Optional[Exception] = None
+
+    # On demande large pour éviter trous / jours fériés / split weird
+    period_days = int(max(lookback_days * 3, lookback_days + 120))
     end = pd.Timestamp.utcnow().normalize()
     start = (end - pd.Timedelta(days=period_days)).date().isoformat()
+    end_str = end.date().isoformat()
 
+    # -------------------------
+    # 1) start / end explicites
+    # -------------------------
     for k in range(max_tries):
         try:
             df = yf.download(
                 ticker,
                 start=start,
+                end=end_str,
                 interval="1d",
                 auto_adjust=True,
                 progress=False,
                 threads=False,
             )
+
             close = _as_close_series(df, ticker)
             close = pd.Series(close).dropna()
+
             if len(close) >= lookback_days + 2:
-                close = close.iloc[-(lookback_days + 2) :]
-            return close
+                return close.iloc[-(lookback_days + 2):]
+
+            last_err = RuntimeError(
+                f"insufficient closes via start/end "
+                f"len={len(close)} df_empty={df is None or df.empty}"
+            )
+
         except Exception as e:
             last_err = e
-            time.sleep(sleep_try * (1.6 ** k))
 
-    # ✅ FIX: your file was cut right here. This is the correct closing line:
-    raise RuntimeError(f"yfinance download failed for {ticker}: {last_err}")
+        time.sleep(sleep_try * (1.6 ** k))
+
+    # -------------------------
+    # 2) fallback period="max"
+    # -------------------------
+    for k in range(max_tries):
+        try:
+            df = yf.download(
+                ticker,
+                period="max",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
+
+            close = _as_close_series(df, ticker)
+            close = pd.Series(close).dropna()
+
+            if len(close) >= lookback_days + 2:
+                return close.iloc[-(lookback_days + 2):]
+
+            last_err = RuntimeError(
+                f"insufficient closes via period=max "
+                f"len={len(close)} df_empty={df is None or df.empty}"
+            )
+
+        except Exception as e:
+            last_err = e
+
+        time.sleep(sleep_try * (1.6 ** k))
+
+    # -------------------------
+    # Échec total
+    # -------------------------
+    raise RuntimeError(
+        f"yfinance download failed or insufficient data for {ticker}: {last_err}"
+    )
 
 
 # =============================
