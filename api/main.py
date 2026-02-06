@@ -114,13 +114,23 @@ def _load_unsup() -> Dict[str, Any]:
 
 
 def _load_sup() -> Dict[str, Any]:
+    """
+    IMPORTANT: must NEVER crash the API.
+    The sup bundle may fail to unpickle if xgboost isn't installed on the runtime image.
+    In that case we disable XGB shadow by returning {}.
+    """
     global _SUP
     if _SUP is None:
         p = Path(SUP_BUNDLE_PATH)
         if not p.exists():
             _SUP = {}
-        else:
+            return _SUP
+
+        try:
             _SUP = joblib.load(p)
+        except Exception as e:
+            print(f"[SUP] failed to load {p}: {type(e).__name__}: {e} -> disabling XGB shadow")
+            _SUP = {}
     return _SUP
 
 
@@ -277,6 +287,7 @@ def _market_ttl_seconds(market: str) -> int:
     m = (market or "").upper()
     if m in ("US", "EU"):
         return int(os.getenv("ORACLE_TTL_US_EU", "28800"))  # 8h
+
     if m in ("ASIA", "OCE"):
         return int(os.getenv("ORACLE_TTL_ASIA_OCE", "43200"))  # 12h
     return int(os.getenv("ORACLE_TTL_GLOBAL", "21600"))  # 6h
@@ -915,10 +926,20 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # =============================
-# XGB shadow (optional)
+# XGB shadow (optional)  ✅ NEVER CRASH
 # =============================
 def _xgb_shadow_score(feats: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Shadow classifier (optional). Must NEVER crash the API.
+    - If sup bundle can't be loaded (missing xgboost / pickle incompat), return None.
+    - If predict fails, return None.
+    """
     if not XGB_SHADOW_ENABLED:
+        return None
+
+    # If file doesn't exist, nothing to do
+    p = Path(SUP_BUNDLE_PATH)
+    if not p.exists():
         return None
 
     sup = _load_sup()
@@ -929,38 +950,43 @@ def _xgb_shadow_score(feats: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if model is None:
         return None
 
-    prep = sup.get("prep") or {}
-    numeric_cols = list(prep.get("numeric_cols") or [])
-    feature_cols = list(prep.get("feature_columns") or [])
-    medians = dict(prep.get("medians") or {})
+    try:
+        prep = sup.get("prep") or {}
+        numeric_cols = list(prep.get("numeric_cols") or [])
+        feature_cols = list(prep.get("feature_columns") or [])
+        medians = dict(prep.get("medians") or {})
 
-    cfg = sup.get("config", DEFAULT_CONFIG)
+        cfg = sup.get("config", DEFAULT_CONFIG)
 
-    row = features_to_row(feats, cfg=cfg)
-    base = {c: row.get(c, None) for c in numeric_cols}
-    base["_asset_type"] = (feats.get("asset_type") or "").strip().lower()
-    base["_market"] = (feats.get("market") or "").strip().upper()
+        row = features_to_row(feats, cfg=cfg)
+        base = {c: row.get(c, None) for c in numeric_cols}
+        base["_asset_type"] = (feats.get("asset_type") or "").strip().lower()
+        base["_market"] = (feats.get("market") or "").strip().upper()
 
-    df = pd.DataFrame([base])
+        df = pd.DataFrame([base])
 
-    for c in numeric_cols:
-        v = _safe_float(df.at[0, c])
-        df.at[0, c] = float(medians.get(c, 0.0)) if v is None else float(v)
+        for c in numeric_cols:
+            v = _safe_float(df.at[0, c])
+            df.at[0, c] = float(medians.get(c, 0.0)) if v is None else float(v)
 
-    X = pd.get_dummies(df, columns=["_asset_type", "_market"], prefix=["asset", "mkt"], dummy_na=False)
+        X = pd.get_dummies(df, columns=["_asset_type", "_market"], prefix=["asset", "mkt"], dummy_na=False)
 
-    for c in feature_cols:
-        if c not in X.columns:
-            X[c] = 0.0
-    X = X[feature_cols].to_numpy(dtype=float)
+        for c in feature_cols:
+            if c not in X.columns:
+                X[c] = 0.0
+        X = X[feature_cols].to_numpy(dtype=float)
 
-    proba = model.predict_proba(X)[0]
-    pred_i = int(np.argmax(proba))
+        proba = model.predict_proba(X)[0]
+        pred_i = int(np.argmax(proba))
 
-    inv = (sup.get("labels") or {}).get("inv") or {0: "ok", 1: "warn", 2: "block"}
-    pred = str(inv.get(pred_i, "ok")).upper()
+        inv = (sup.get("labels") or {}).get("inv") or {0: "ok", 1: "warn", 2: "block"}
+        pred = str(inv.get(pred_i, "ok")).upper()
 
-    return {"pred": pred, "probs": {"OK": float(proba[0]), "WARN": float(proba[1]), "BLOCK": float(proba[2])}}
+        return {"pred": pred, "probs": {"OK": float(proba[0]), "WARN": float(proba[1]), "BLOCK": float(proba[2])}}
+
+    except Exception as e:
+        print(f"[XGB] shadow error: {type(e).__name__}: {e}")
+        return None
 
 
 # =============================
@@ -1061,6 +1087,11 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
     _require_api_key(x_api_key)
 
     lovable_feats = _features_dict(req.lovable)
+    print(
+        f"[score_oracle] ticker={lovable_feats.get('ticker')} "
+        f"has_closes={bool(req.closes)} "
+        f"n_closes={len(req.closes) if req.closes else 0}"
+    )
     integrity_flags, integrity_critical = _integrity_flags(lovable_feats)
     unsup = _unsup_score(lovable_feats)
 
@@ -1220,7 +1251,17 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
     if oracle_meta is not None:
         out["oracle_meta"] = oracle_meta
 
+    out["oracle_input_debug"] = {
+        "has_closes": bool(req.closes),
+        "n_closes": int(len(req.closes) if req.closes else 0),
+        "has_dates": bool(req.dates),
+        "n_dates": int(len(req.dates) if req.dates else 0),
+        "lookback_days": int(req.lookback_days),
+    }
+
     return out
+
+
 
 
 
