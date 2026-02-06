@@ -287,7 +287,6 @@ def _market_ttl_seconds(market: str) -> int:
     m = (market or "").upper()
     if m in ("US", "EU"):
         return int(os.getenv("ORACLE_TTL_US_EU", "28800"))  # 8h
-
     if m in ("ASIA", "OCE"):
         return int(os.getenv("ORACLE_TTL_ASIA_OCE", "43200"))  # 12h
     return int(os.getenv("ORACLE_TTL_GLOBAL", "21600"))  # 6h
@@ -365,15 +364,11 @@ def _download_daily_stooq(ticker: str, lookback_days: int, market: str) -> pd.Se
     if not first_line.lower().startswith("date,open,high,low,close"):
         # very likely HTML / anti-bot page or some error payload
         sample = txt[:300].replace("\n", "\\n")
-        raise RuntimeError(
-            f"stooq non-csv response (first_line='{first_line[:80]}') sample='{sample}'"
-        )
+        raise RuntimeError(f"stooq non-csv response (first_line='{first_line[:80]}') sample='{sample}'")
 
     df = pd.read_csv(io.StringIO(txt))
     if df is None or df.empty or "Close" not in df.columns or "Date" not in df.columns:
-        raise RuntimeError(
-            f"stooq parsed but missing columns: cols={list(df.columns) if df is not None else None}"
-        )
+        raise RuntimeError(f"stooq parsed but missing columns: cols={list(df.columns) if df is not None else None}")
 
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
@@ -412,9 +407,7 @@ def _download_daily_yf(ticker: str, lookback_days: int, max_tries: int, sleep_tr
             if len(close) >= lookback_days + 2:
                 return close.iloc[-(lookback_days + 2) :]
 
-            last_err = RuntimeError(
-                f"insufficient closes via start/end len={len(close)} df_empty={df is None or df.empty}"
-            )
+            last_err = RuntimeError(f"insufficient closes via start/end len={len(close)} df_empty={df is None or df.empty}")
         except Exception as e:
             last_err = e
 
@@ -437,9 +430,7 @@ def _download_daily_yf(ticker: str, lookback_days: int, max_tries: int, sleep_tr
             if len(close) >= lookback_days + 2:
                 return close.iloc[-(lookback_days + 2) :]
 
-            last_err = RuntimeError(
-                f"insufficient closes via period=max len={len(close)} df_empty={df is None or df.empty}"
-            )
+            last_err = RuntimeError(f"insufficient closes via period=max len={len(close)} df_empty={df is None or df.empty}")
         except Exception as e:
             last_err = e
 
@@ -654,7 +645,6 @@ def _oracle_compute_from_closes(
         "tail_obs_99": tail_obs_99,
         "rsi": float(_rsi(closes)) if len(closes) >= 20 else None,
         "corr_mkt": 0.0,
-        # added
         "skew": float(skew) if np.isfinite(skew) else None,
         "kurtosis_excess": float(kurt_excess) if np.isfinite(kurt_excess) else None,
         "vol_ewma_ann": float(vol_ewma_ann) if np.isfinite(vol_ewma_ann) else None,
@@ -671,14 +661,15 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
     market = (req.market or "").strip().upper()
     ticker = (req.ticker or "").strip() if req.ticker else ""
 
-    # ✅ Cas 0: closes fournis ET pas de ticker -> compute direct (pas de download possible)
-    if req.closes and not ticker:
+    # ✅ Cas 0: closes fournis -> compute direct (même si ticker est fourni)
+    # But: en prod cloud, si Lovable envoie closes, on ne veut JAMAIS tenter yfinance/stooq.
+    if req.closes and len(req.closes) >= (req.lookback_days + 2):
         closes = pd.Series(req.closes, dtype=float)
-        feats = _oracle_compute_from_closes(asset_type, market, None, closes, req.lookback_days)
+        feats = _oracle_compute_from_closes(asset_type, market, (ticker or None), closes, req.lookback_days)
         meta = {"oracle_source": "provided_closes", "oracle_cache_hit": False}
         return feats, meta
 
-    # ✅ Si pas de ticker et pas de closes -> impossible
+    # ✅ Si pas de ticker et pas assez de closes -> impossible
     if not ticker and not req.closes:
         raise ValueError("ticker required when closes not provided")
 
@@ -774,10 +765,10 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
             return feats2, meta2
 
         except Exception as stooq_err:
-            # ✅ Patch minimal: fallback final sur closes si Lovable les a envoyés
+            # ✅ fallback final sur closes si elles existent mais insuffisantes au début (rare)
             if req.closes:
                 closes = pd.Series(req.closes, dtype=float)
-                feats3 = _oracle_compute_from_closes(asset_type, market, ticker, closes, req.lookback_days)
+                feats3 = _oracle_compute_from_closes(asset_type, market, (ticker or None), closes, req.lookback_days)
                 meta3 = {
                     "oracle_source": "provided_closes_fallback",
                     "oracle_cache_hit": False,
@@ -786,7 +777,6 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
                 }
                 return feats3, meta3
 
-            # sinon: erreur explicite
             raise RuntimeError(f"yfinance failed ({yf_err}) and stooq failed ({stooq_err})")
 
 
@@ -819,6 +809,10 @@ def _unsup_vector_numpy(feats: Dict[str, Any], cfg: Dict[str, Any], cols: list[s
         row.append(fv)
 
     X = np.asarray([row], dtype=float)
+
+    # ✅ Patch: avoid RuntimeWarning: All-NaN slice encountered
+    if np.all(np.isnan(X)):
+        return np.zeros_like(X, dtype=float)
 
     if np.isnan(X).any():
         meds = np.nanmedian(X, axis=0)
@@ -1034,7 +1028,9 @@ def health() -> Dict[str, Any]:
 
 
 @app.post("/oracle/analyze")
-def oracle_endpoint(req: OracleRequest, x_api_key: Optional[str] = Header(default=None, alias="x-api-key")) -> Dict[str, Any]:
+def oracle_endpoint(
+    req: OracleRequest, x_api_key: Optional[str] = Header(default=None, alias="x-api-key")
+) -> Dict[str, Any]:
     _require_api_key(x_api_key)
     try:
         feats, meta = _oracle_analyze(req)
@@ -1161,11 +1157,12 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
             oracle_mode = "recompute"
 
         try:
+            # ✅ Patch: en rescue => ticker=None pour empêcher TOUT download (yfinance/stooq)
             oreq = OracleRequest(
                 asset_type=lovable_feats.get("asset_type") or "equity",
                 market=lovable_feats.get("market") or "US",
-                ticker=lovable_feats.get("ticker"),
-                closes=req.closes if oracle_mode == "rescue" else None,  # ✅ clé
+                ticker=None if oracle_mode == "rescue" else lovable_feats.get("ticker"),
+                closes=req.closes if oracle_mode == "rescue" else None,
                 dates=req.dates if oracle_mode == "rescue" else None,
                 lookback_days=req.lookback_days,
             )
@@ -1260,6 +1257,7 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
     }
 
     return out
+
 
 
 
