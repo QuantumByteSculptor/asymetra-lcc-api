@@ -363,12 +363,17 @@ def _download_daily_stooq(ticker: str, lookback_days: int, market: str) -> pd.Se
     # Date,Open,High,Low,Close,Volume
     first_line = txt.splitlines()[0].strip()
     if not first_line.lower().startswith("date,open,high,low,close"):
+        # very likely HTML / anti-bot page or some error payload
         sample = txt[:300].replace("\n", "\\n")
-        raise RuntimeError(f"stooq non-csv response (first_line='{first_line[:80]}') sample='{sample}'")
+        raise RuntimeError(
+            f"stooq non-csv response (first_line='{first_line[:80]}') sample='{sample}'"
+        )
 
     df = pd.read_csv(io.StringIO(txt))
     if df is None or df.empty or "Close" not in df.columns or "Date" not in df.columns:
-        raise RuntimeError(f"stooq parsed but missing columns: cols={list(df.columns) if df is not None else None}")
+        raise RuntimeError(
+            f"stooq parsed but missing columns: cols={list(df.columns) if df is not None else None}"
+        )
 
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
@@ -384,6 +389,7 @@ def _download_daily_yf(ticker: str, lookback_days: int, max_tries: int, sleep_tr
     last_err: Optional[Exception] = None
     t = (ticker or "").strip()
 
+    # 1) start/end
     period_days = int(max(lookback_days * 3, lookback_days + 120))
     end = pd.Timestamp.utcnow().normalize()
     start_s = (end - pd.Timedelta(days=period_days)).date().isoformat()
@@ -406,12 +412,15 @@ def _download_daily_yf(ticker: str, lookback_days: int, max_tries: int, sleep_tr
             if len(close) >= lookback_days + 2:
                 return close.iloc[-(lookback_days + 2) :]
 
-            last_err = RuntimeError(f"insufficient closes via start/end len={len(close)} df_empty={df is None or df.empty}")
+            last_err = RuntimeError(
+                f"insufficient closes via start/end len={len(close)} df_empty={df is None or df.empty}"
+            )
         except Exception as e:
             last_err = e
 
         time.sleep(sleep_try * (1.6**k))
 
+    # 2) fallback yfinance: period=max
     for k in range(max_tries):
         try:
             df = yf.download(
@@ -428,7 +437,9 @@ def _download_daily_yf(ticker: str, lookback_days: int, max_tries: int, sleep_tr
             if len(close) >= lookback_days + 2:
                 return close.iloc[-(lookback_days + 2) :]
 
-            last_err = RuntimeError(f"insufficient closes via period=max len={len(close)} df_empty={df is None or df.empty}")
+            last_err = RuntimeError(
+                f"insufficient closes via period=max len={len(close)} df_empty={df is None or df.empty}"
+            )
         except Exception as e:
             last_err = e
 
@@ -548,9 +559,9 @@ def _stress_var(
 ) -> Dict[str, Any]:
     """
     Stress VaR:
-    - finds worst rolling window (by cumulative return)
-    - computes VaR_q in that window
-    - computes multiplier vs base VaR99 if available
+    - trouve la pire fenêtre glissante (par performance cumulée)
+    - calcule VaR_q dans cette fenêtre
+    - calcule un multiplicateur vs VaR99 "normale" si dispo
     """
     r = np.asarray(returns, dtype=float)
     r = r[np.isfinite(r)]
@@ -619,6 +630,7 @@ def _oracle_compute_from_closes(
 
     tail_obs_99 = int(max(0, np.sum((-ret252).to_numpy(dtype=float) >= (v99 if np.isfinite(v99) else 1e9))))
 
+    # Extra metrics
     r = ret252.to_numpy(dtype=float)
     skew, kurt_excess = _skew_kurtosis(r)
     vol_ewma_ann = _ewma_vol_ann(r, lam=0.94, ann=252)
@@ -642,6 +654,7 @@ def _oracle_compute_from_closes(
         "tail_obs_99": tail_obs_99,
         "rsi": float(_rsi(closes)) if len(closes) >= 20 else None,
         "corr_mkt": 0.0,
+        # added
         "skew": float(skew) if np.isfinite(skew) else None,
         "kurtosis_excess": float(kurt_excess) if np.isfinite(kurt_excess) else None,
         "vol_ewma_ann": float(vol_ewma_ann) if np.isfinite(vol_ewma_ann) else None,
@@ -658,14 +671,14 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
     market = (req.market or "").strip().upper()
     ticker = (req.ticker or "").strip() if req.ticker else ""
 
-    # ✅ Case 0: closes provided AND no ticker -> direct compute
+    # ✅ Cas 0: closes fournis ET pas de ticker -> compute direct (pas de download possible)
     if req.closes and not ticker:
         closes = pd.Series(req.closes, dtype=float)
         feats = _oracle_compute_from_closes(asset_type, market, None, closes, req.lookback_days)
         meta = {"oracle_source": "provided_closes", "oracle_cache_hit": False}
         return feats, meta
 
-    # ✅ If no ticker and no closes -> impossible
+    # ✅ Si pas de ticker et pas de closes -> impossible
     if not ticker and not req.closes:
         raise ValueError("ticker required when closes not provided")
 
@@ -761,7 +774,7 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
             return feats2, meta2
 
         except Exception as stooq_err:
-            # ✅ Final fallback: if closes were provided, compute from them
+            # ✅ Patch minimal: fallback final sur closes si Lovable les a envoyés
             if req.closes:
                 closes = pd.Series(req.closes, dtype=float)
                 feats3 = _oracle_compute_from_closes(asset_type, market, ticker, closes, req.lookback_days)
@@ -773,6 +786,7 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
                 }
                 return feats3, meta3
 
+            # sinon: erreur explicite
             raise RuntimeError(f"yfinance failed ({yf_err}) and stooq failed ({stooq_err})")
 
 
@@ -781,13 +795,12 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
 # =============================
 def _unsup_vector_numpy(feats: Dict[str, Any], cfg: Dict[str, Any], cols: list[str]) -> np.ndarray:
     """
-    Builds 1xD vector, imputes NaNs to 0 at the end.
-
-    Patch: avoid RuntimeWarning "All-NaN slice encountered" by NOT calling
-    np.nanmedian on an all-NaN column (common when Lovable sends partial stats).
+    Builds 1xD vector. For API scoring we only have one row, so median-imputation
+    is ill-defined. We simply coerce missing/non-finite values to 0.0 to avoid
+    nanmedian warnings and keep scoring stable.
     """
     row_dict = features_to_row(feats, cfg=cfg)
-    row: List[float] = []
+    row = []
 
     for c in cols:
         v = row_dict.get(c, None)
@@ -800,34 +813,13 @@ def _unsup_vector_numpy(feats: Dict[str, Any], cfg: Dict[str, Any], cols: list[s
         try:
             fv = float(v)
             if not np.isfinite(fv):
-                fv = np.nan
+                fv = 0.0
         except Exception:
-            fv = np.nan
+            fv = 0.0
 
         row.append(fv)
 
-    X = np.asarray([row], dtype=float)  # shape (1, D)
-
-    # Per-column imputation without nanmedian warnings
-    if np.isnan(X).any():
-        D = X.shape[1]
-        meds = np.zeros(D, dtype=float)
-
-        for j in range(D):
-            col = X[:, j]
-            # If the whole column is NaN -> 0 (do NOT call nanmedian)
-            if np.all(np.isnan(col)):
-                meds[j] = 0.0
-            else:
-                # Safe: at least one finite/number exists in this column
-                meds[j] = float(np.nanmedian(col))
-
-                if not np.isfinite(meds[j]):
-                    meds[j] = 0.0
-
-        ii, jj = np.where(np.isnan(X))
-        X[ii, jj] = meds[jj]
-
+    X = np.asarray([row], dtype=float)
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
     return X
 
@@ -939,6 +931,7 @@ def _xgb_shadow_score(feats: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not XGB_SHADOW_ENABLED:
         return None
 
+    # If file doesn't exist, nothing to do
     p = Path(SUP_BUNDLE_PATH)
     if not p.exists():
         return None
@@ -1022,12 +1015,11 @@ def _integrity_flags(feats: Dict[str, Any]) -> Tuple[List[str], List[str]]:
 # =============================
 @app.get("/")
 def root() -> Dict[str, Any]:
-    # Stops noisy 404s in Render logs when it health-checks "/"
     return {
         "ok": True,
-        "app": "api.main",
+        "service": "asymetra-lcc-api",
         "version": app.version,
-        "paths_hint": ["/health", "/oracle/analyze", "/score", "/score_oracle"],
+        "hint": "Use /health, /score, /score_oracle, /oracle/analyze",
     }
 
 
@@ -1037,7 +1029,7 @@ def health() -> Dict[str, Any]:
         "ok": True,
         "app": "api.main",
         "version": app.version,
-        "paths_hint": ["/health", "/oracle/analyze", "/score", "/score_oracle"],
+        "paths_hint": ["/", "/health", "/oracle/analyze", "/score", "/score_oracle"],
         "oracle_cache_db": ORACLE_CACHE_DB,
         "oracle_cache_columns": _ORACLE_CACHE.columns(),
         "oracle_cache_recent": _ORACLE_CACHE.recent(limit=5),
@@ -1164,9 +1156,9 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
     if should_oracle:
         oracle_used = True
 
-        # Mode:
-        # - if closes provided => rescue (no external dependency)
-        # - else => recompute (yfinance/stooq)
+        # ✅ Mode choisi:
+        # - si Lovable fournit des closes => Oracle "rescue" (aucune dépendance externe)
+        # - sinon => Oracle "recompute" (tente yfinance/stooq)
         if req.closes and len(req.closes) >= (req.lookback_days + 2):
             oracle_mode = "rescue"
         else:
@@ -1177,7 +1169,7 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
                 asset_type=lovable_feats.get("asset_type") or "equity",
                 market=lovable_feats.get("market") or "US",
                 ticker=lovable_feats.get("ticker"),
-                closes=req.closes if oracle_mode == "rescue" else None,
+                closes=req.closes if oracle_mode == "rescue" else None,  # ✅ clé
                 dates=req.dates if oracle_mode == "rescue" else None,
                 lookback_days=req.lookback_days,
             )
@@ -1272,6 +1264,8 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
     }
 
     return out
+
+
 
 
 
