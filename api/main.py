@@ -6,8 +6,6 @@ import time
 import json
 import sqlite3
 import io
-import contextlib
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
@@ -48,23 +46,11 @@ XGB_OK_PBLOCK_MAX = float(os.getenv("ORACLE_XGB_OK_PBLOCK_MAX", "0.20"))
 UNSUP_MAX_MISSING_RATIO = float(os.getenv("UNSUP_MAX_MISSING_RATIO", "0.25"))  # e.g., 25%
 UNSUP_MAX_MISSING_COUNT = int(os.getenv("UNSUP_MAX_MISSING_COUNT", "0"))  # 0 = ignore count gate
 
-# ✅ yfinance log noise control
-YF_SILENT = os.getenv("YF_SILENT", "1").strip() not in ("0", "false", "False")
-
-# ✅ GARCH perf knobs
-GARCH_ENABLED = os.getenv("GARCH_ENABLED", "1").strip() not in ("0", "false", "False")
-GARCH_MAXITER = int(os.getenv("GARCH_MAXITER", "120"))
-GARCH_MIN_N = int(os.getenv("GARCH_MIN_N", "220"))  # min size to attempt GARCH
-
 
 # =============================
 # FastAPI
 # =============================
-app = FastAPI(title="Asymetra LCC API", version="1.8-oracle-yf-silent-garchopt+stressvar+stooq-UA")
-
-# Reduce known noisy loggers
-logging.getLogger("yfinance").setLevel(logging.ERROR)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
+app = FastAPI(title="Asymetra LCC API", version="1.7-oracle-garch+stressvar+stooq-UA")
 
 
 # =============================
@@ -182,27 +168,6 @@ def _features_dict(req: ScoreRequest) -> Dict[str, Any]:
 
 def _utc_now() -> int:
     return int(time.time())
-
-
-@contextlib.contextmanager
-def _silence_stdout_stderr(enabled: bool = True):
-    if not enabled:
-        yield
-        return
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        yield
-
-
-def _is_structural_yf_error(e: Exception) -> bool:
-    s = f"{type(e).__name__}: {e}".lower()
-    bad_markers = [
-        "no timezone found",
-        "possibly delisted",
-        "yftzmissingerror",
-        "expecting value: line 1 column 1",
-        "json decode",
-    ]
-    return any(m in s for m in bad_markers)
 
 
 # =============================
@@ -394,18 +359,16 @@ def _download_daily_stooq(ticker: str, lookback_days: int, market: str) -> pd.Se
     if not txt:
         raise RuntimeError("stooq returned empty body")
 
+    # Stooq CSV should start with header line like:
+    # Date,Open,High,Low,Close,Volume
     first_line = txt.splitlines()[0].strip()
     if not first_line.lower().startswith("date,open,high,low,close"):
         sample = txt[:300].replace("\n", "\\n")
-        raise RuntimeError(
-            f"stooq non-csv response (first_line='{first_line[:80]}') sample='{sample}'"
-        )
+        raise RuntimeError(f"stooq non-csv response (first_line='{first_line[:80]}') sample='{sample}'")
 
     df = pd.read_csv(io.StringIO(txt))
     if df is None or df.empty or "Close" not in df.columns or "Date" not in df.columns:
-        raise RuntimeError(
-            f"stooq parsed but missing columns: cols={list(df.columns) if df is not None else None}"
-        )
+        raise RuntimeError(f"stooq parsed but missing columns: cols={list(df.columns) if df is not None else None}")
 
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
@@ -421,7 +384,6 @@ def _download_daily_yf(ticker: str, lookback_days: int, max_tries: int, sleep_tr
     last_err: Optional[Exception] = None
     t = (ticker or "").strip()
 
-    # 1) start/end
     period_days = int(max(lookback_days * 3, lookback_days + 120))
     end = pd.Timestamp.utcnow().normalize()
     start_s = (end - pd.Timedelta(days=period_days)).date().isoformat()
@@ -429,57 +391,46 @@ def _download_daily_yf(ticker: str, lookback_days: int, max_tries: int, sleep_tr
 
     for k in range(max_tries):
         try:
-            with _silence_stdout_stderr(YF_SILENT):
-                df = yf.download(
-                    t,
-                    start=start_s,
-                    end=end_s,
-                    interval="1d",
-                    auto_adjust=True,
-                    progress=False,
-                    threads=False,
-                )
+            df = yf.download(
+                t,
+                start=start_s,
+                end=end_s,
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
             close = _as_close_series(df, t)
             close = pd.Series(close).dropna()
 
             if len(close) >= lookback_days + 2:
                 return close.iloc[-(lookback_days + 2) :]
 
-            last_err = RuntimeError(
-                f"insufficient closes via start/end len={len(close)} df_empty={df is None or df.empty}"
-            )
+            last_err = RuntimeError(f"insufficient closes via start/end len={len(close)} df_empty={df is None or df.empty}")
         except Exception as e:
             last_err = e
-            if _is_structural_yf_error(e):
-                break
 
         time.sleep(sleep_try * (1.6**k))
 
-    # 2) fallback yfinance: period=max
     for k in range(max_tries):
         try:
-            with _silence_stdout_stderr(YF_SILENT):
-                df = yf.download(
-                    t,
-                    period="max",
-                    interval="1d",
-                    auto_adjust=True,
-                    progress=False,
-                    threads=False,
-                )
+            df = yf.download(
+                t,
+                period="max",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
             close = _as_close_series(df, t)
             close = pd.Series(close).dropna()
 
             if len(close) >= lookback_days + 2:
                 return close.iloc[-(lookback_days + 2) :]
 
-            last_err = RuntimeError(
-                f"insufficient closes via period=max len={len(close)} df_empty={df is None or df.empty}"
-            )
+            last_err = RuntimeError(f"insufficient closes via period=max len={len(close)} df_empty={df is None or df.empty}")
         except Exception as e:
             last_err = e
-            if _is_structural_yf_error(e):
-                break
 
         time.sleep(sleep_try * (1.6**k))
 
@@ -566,15 +517,8 @@ def _ewma_vol_ann(returns: np.ndarray, lam: float = 0.94, ann: int = 252) -> flo
 def _garch_vol_ann(returns: np.ndarray, ann: int = 252) -> Optional[float]:
     """
     GARCH(1,1) via 'arch' package.
-    Optimisé pour prod:
-    - désactivable via env
-    - ne tente pas si dataset court
-    - fit limité en itérations
-    - fallback None si ça coince
+    Returns annualized conditional volatility (last value) or None if fitting fails.
     """
-    if not GARCH_ENABLED:
-        return None
-
     try:
         from arch import arch_model  # type: ignore
     except Exception:
@@ -582,36 +526,15 @@ def _garch_vol_ann(returns: np.ndarray, ann: int = 252) -> Optional[float]:
 
     r = np.asarray(returns, dtype=float)
     r = r[np.isfinite(r)]
-    if len(r) < GARCH_MIN_N:
+    if len(r) < 200:
         return None
 
-    # éviter des fits trop lourds si série très longue
-    if len(r) > 600:
-        r = r[-600:]
-
-    rp = 100.0 * r  # arch préfère des % returns
-
+    rp = 100.0 * r  # arch likes percent returns
     try:
-        am = arch_model(
-            rp,
-            vol="GARCH",
-            p=1,
-            q=1,
-            mean="Zero",
-            dist="normal",
-            rescale=False,
-        )
-        res = am.fit(
-            disp="off",
-            show_warning=False,
-            update_freq=0,
-            options={"maxiter": GARCH_MAXITER},
-        )
-
+        am = arch_model(rp, vol="GARCH", p=1, q=1, mean="Zero", dist="normal")
+        res = am.fit(disp="off")
         cond_vol_daily_pct = float(res.conditional_volatility.iloc[-1])
         cond_vol_daily = cond_vol_daily_pct / 100.0
-        if not np.isfinite(cond_vol_daily) or cond_vol_daily < 0:
-            return None
         return float(cond_vol_daily * np.sqrt(ann))
     except Exception:
         return None
@@ -625,9 +548,9 @@ def _stress_var(
 ) -> Dict[str, Any]:
     """
     Stress VaR:
-    - trouve la pire fenêtre glissante (par performance cumulée)
-    - calcule VaR_q dans cette fenêtre
-    - calcule un multiplicateur vs VaR99 "normale" si dispo
+    - finds worst rolling window (by cumulative return)
+    - computes VaR_q in that window
+    - computes multiplier vs base VaR99 if available
     """
     r = np.asarray(returns, dtype=float)
     r = r[np.isfinite(r)]
@@ -682,30 +605,25 @@ def _oracle_compute_from_closes(
     rets = closes.pct_change().dropna()
 
     ret20 = rets.tail(20)
-    retN = rets.tail(lookback_days)
+    ret252 = rets.tail(lookback_days)
 
     vol_20d = float(np.std(ret20.to_numpy(dtype=float), ddof=1)) if len(ret20) >= 10 else float("nan")
-    vol_ann = _realized_vol_ann(retN)
+    vol_ann = _realized_vol_ann(ret252)
     mdd = _max_drawdown(closes)
 
-    v95, e95 = _var_es(retN, 0.95)
-    v99, e99 = _var_es(retN, 0.99)
+    v95, e95 = _var_es(ret252, 0.95)
+    v99, e99 = _var_es(ret252, 0.99)
 
-    n_used = int(len(retN))
+    n_used = int(len(ret252))
     missing_pct = float(max(0.0, min(1.0, 1.0 - (n_used / float(lookback_days)))))
 
-    tail_obs_99 = int(max(0, np.sum((-retN).to_numpy(dtype=float) >= (v99 if np.isfinite(v99) else 1e9))))
+    tail_obs_99 = int(max(0, np.sum((-ret252).to_numpy(dtype=float) >= (v99 if np.isfinite(v99) else 1e9))))
 
-    # Extra metrics
-    r = retN.to_numpy(dtype=float)
+    r = ret252.to_numpy(dtype=float)
     skew, kurt_excess = _skew_kurtosis(r)
     vol_ewma_ann = _ewma_vol_ann(r, lam=0.94, ann=252)
     vol_garch_ann = _garch_vol_ann(r, ann=252)
     stress = _stress_var(r, base_var99=(v99 if np.isfinite(v99) else None), window=20, q=0.99)
-
-    # Best-effort modeled vol
-    vol_model_ann = vol_garch_ann if (vol_garch_ann is not None and np.isfinite(vol_garch_ann)) else vol_ewma_ann
-    vol_model_kind = "garch" if (vol_garch_ann is not None and np.isfinite(vol_garch_ann)) else "ewma"
 
     return {
         "asset_type": asset_type,
@@ -724,13 +642,10 @@ def _oracle_compute_from_closes(
         "tail_obs_99": tail_obs_99,
         "rsi": float(_rsi(closes)) if len(closes) >= 20 else None,
         "corr_mkt": 0.0,
-        # added
         "skew": float(skew) if np.isfinite(skew) else None,
         "kurtosis_excess": float(kurt_excess) if np.isfinite(kurt_excess) else None,
         "vol_ewma_ann": float(vol_ewma_ann) if np.isfinite(vol_ewma_ann) else None,
         "vol_garch_ann": float(vol_garch_ann) if vol_garch_ann is not None and np.isfinite(vol_garch_ann) else None,
-        "vol_model_ann": float(vol_model_ann) if np.isfinite(vol_model_ann) else None,
-        "vol_model_kind": vol_model_kind,
         "stress_var99": stress.get("stress_var99"),
         "stress_multiplier": stress.get("stress_multiplier"),
         "stress_window_days": stress.get("stress_window_days"),
@@ -743,14 +658,14 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
     market = (req.market or "").strip().upper()
     ticker = (req.ticker or "").strip() if req.ticker else ""
 
-    # ✅ Cas 0: closes fournis ET pas de ticker -> compute direct (pas de download possible)
+    # ✅ Case 0: closes provided AND no ticker -> direct compute
     if req.closes and not ticker:
         closes = pd.Series(req.closes, dtype=float)
         feats = _oracle_compute_from_closes(asset_type, market, None, closes, req.lookback_days)
         meta = {"oracle_source": "provided_closes", "oracle_cache_hit": False}
         return feats, meta
 
-    # ✅ Si pas de ticker et pas de closes -> impossible
+    # ✅ If no ticker and no closes -> impossible
     if not ticker and not req.closes:
         raise ValueError("ticker required when closes not provided")
 
@@ -846,7 +761,7 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
             return feats2, meta2
 
         except Exception as stooq_err:
-            # ✅ Patch minimal: fallback final sur closes si Lovable les a envoyés
+            # ✅ Final fallback: if closes were provided, compute from them
             if req.closes:
                 closes = pd.Series(req.closes, dtype=float)
                 feats3 = _oracle_compute_from_closes(asset_type, market, ticker, closes, req.lookback_days)
@@ -858,7 +773,6 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
                 }
                 return feats3, meta3
 
-            # sinon: erreur explicite
             raise RuntimeError(f"yfinance failed ({yf_err}) and stooq failed ({stooq_err})")
 
 
@@ -868,10 +782,12 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
 def _unsup_vector_numpy(feats: Dict[str, Any], cfg: Dict[str, Any], cols: list[str]) -> np.ndarray:
     """
     Builds 1xD vector, imputes NaNs to 0 at the end.
-    Used for actual model scoring.
+
+    Patch: avoid RuntimeWarning "All-NaN slice encountered" by NOT calling
+    np.nanmedian on an all-NaN column (common when Lovable sends partial stats).
     """
     row_dict = features_to_row(feats, cfg=cfg)
-    row = []
+    row: List[float] = []
 
     for c in cols:
         v = row_dict.get(c, None)
@@ -890,11 +806,25 @@ def _unsup_vector_numpy(feats: Dict[str, Any], cfg: Dict[str, Any], cols: list[s
 
         row.append(fv)
 
-    X = np.asarray([row], dtype=float)
+    X = np.asarray([row], dtype=float)  # shape (1, D)
 
+    # Per-column imputation without nanmedian warnings
     if np.isnan(X).any():
-        meds = np.nanmedian(X, axis=0)
-        meds = np.where(np.isnan(meds), 0.0, meds)
+        D = X.shape[1]
+        meds = np.zeros(D, dtype=float)
+
+        for j in range(D):
+            col = X[:, j]
+            # If the whole column is NaN -> 0 (do NOT call nanmedian)
+            if np.all(np.isnan(col)):
+                meds[j] = 0.0
+            else:
+                # Safe: at least one finite/number exists in this column
+                meds[j] = float(np.nanmedian(col))
+
+                if not np.isfinite(meds[j]):
+                    meds[j] = 0.0
+
         ii, jj = np.where(np.isnan(X))
         X[ii, jj] = meds[jj]
 
@@ -1090,6 +1020,17 @@ def _integrity_flags(feats: Dict[str, Any]) -> Tuple[List[str], List[str]]:
 # =============================
 # Endpoints
 # =============================
+@app.get("/")
+def root() -> Dict[str, Any]:
+    # Stops noisy 404s in Render logs when it health-checks "/"
+    return {
+        "ok": True,
+        "app": "api.main",
+        "version": app.version,
+        "paths_hint": ["/health", "/oracle/analyze", "/score", "/score_oracle"],
+    }
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {
@@ -1101,8 +1042,6 @@ def health() -> Dict[str, Any]:
         "oracle_cache_columns": _ORACLE_CACHE.columns(),
         "oracle_cache_recent": _ORACLE_CACHE.recent(limit=5),
         "unsup_coverage": {"max_missing_ratio": UNSUP_MAX_MISSING_RATIO, "max_missing_count": UNSUP_MAX_MISSING_COUNT},
-        "yf_silent": YF_SILENT,
-        "garch": {"enabled": GARCH_ENABLED, "maxiter": GARCH_MAXITER, "min_n": GARCH_MIN_N},
     }
 
 
@@ -1165,7 +1104,6 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
         f"has_closes={bool(req.closes)} "
         f"n_closes={len(req.closes) if req.closes else 0}"
     )
-
     integrity_flags, integrity_critical = _integrity_flags(lovable_feats)
     unsup = _unsup_score(lovable_feats)
 
@@ -1226,9 +1164,9 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
     if should_oracle:
         oracle_used = True
 
-        # ✅ Mode choisi:
-        # - si Lovable fournit des closes => Oracle "rescue" (aucune dépendance externe)
-        # - sinon => Oracle "recompute" (tente yfinance/stooq)
+        # Mode:
+        # - if closes provided => rescue (no external dependency)
+        # - else => recompute (yfinance/stooq)
         if req.closes and len(req.closes) >= (req.lookback_days + 2):
             oracle_mode = "rescue"
         else:
@@ -1239,7 +1177,7 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
                 asset_type=lovable_feats.get("asset_type") or "equity",
                 market=lovable_feats.get("market") or "US",
                 ticker=lovable_feats.get("ticker"),
-                closes=req.closes if oracle_mode == "rescue" else None,  # ✅ clé
+                closes=req.closes if oracle_mode == "rescue" else None,
                 dates=req.dates if oracle_mode == "rescue" else None,
                 lookback_days=req.lookback_days,
             )
