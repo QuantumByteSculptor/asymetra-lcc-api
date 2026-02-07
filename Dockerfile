@@ -39,7 +39,7 @@ RUN mkdir -p /app/models \
 # ============================
 COPY api /app/api
 COPY features.py /app/features.py
-COPY thresholds_config.py /app/thresholds_config.py
+COPY configs/thresholds_config.py /app/thresholds_config.py
 
 # ============================
 # Runtime configuration
