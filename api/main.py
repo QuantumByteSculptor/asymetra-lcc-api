@@ -671,23 +671,47 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
     market = (req.market or "").strip().upper()
     ticker = (req.ticker or "").strip() if req.ticker else ""
 
-    # ✅ Cas 0: closes fournis ET pas de ticker -> compute direct (pas de download possible)
-    if req.closes and not ticker:
+    # ✅ CAS 1 : closes fournis -> MODE RESCUE 100% OFFLINE
+    # On ne touche NI au cache NI à yfinance NI à stooq.
+    if req.closes:
         closes = pd.Series(req.closes, dtype=float)
-        feats = _oracle_compute_from_closes(asset_type, market, None, closes, req.lookback_days)
-        meta = {"oracle_source": "provided_closes", "oracle_cache_hit": False}
+
+        feats = _oracle_compute_from_closes(
+            asset_type=asset_type,
+            market=market,
+            ticker=ticker or None,  # ticker facultatif, purement informatif
+            close=closes,
+            lookback_days=req.lookback_days,
+        )
+
+        meta: Dict[str, Any] = {
+            "oracle_source": "provided_closes",
+            "oracle_cache_hit": False,
+            "oracle_cache_ttl_seconds": 0,
+            "oracle_cache_expires_at_utc": None,
+            "oracle_note": "rescued from frontend closes; no external provider used",
+        }
         return feats, meta
 
-    # ✅ Si pas de ticker et pas de closes -> impossible
-    if not ticker and not req.closes:
-        raise ValueError("ticker required when closes not provided")
+    # ✅ CAS 2 : pas de closes -> on a OBLIGATOIREMENT besoin d'un ticker
+    if not ticker:
+        raise ValueError("ticker required when closes are not provided")
 
     now = _utc_now()
     ttl = _market_ttl_seconds(market)
 
-    # 1) Try cache for yfinance
+    # ====== BRANCHE PROVIDER CLASSIQUE (yfinance + stooq) ======
+
+    # 1) Cache yfinance
     source = "yfinance"
-    key = OracleCache.make_key(asset_type, market, ticker, int(req.lookback_days), source)
+    key = OracleCache.make_key(
+        asset_type=asset_type,
+        market=market,
+        ticker=ticker,
+        lookback_days=int(req.lookback_days),
+        source=source,
+    )
+
     hit = _ORACLE_CACHE.get(key, now_utc=now)
     if hit is not None:
         feats = json.loads(hit.row_json)
@@ -699,10 +723,22 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
         }
         return feats, meta
 
-    # 2) Download yfinance
+    # 2) Download via yfinance
     try:
-        close = _download_daily_yf(ticker, req.lookback_days, ORACLE_MAX_TRIES, ORACLE_SLEEP_TRY)
-        feats = _oracle_compute_from_closes(asset_type, market, ticker, close, req.lookback_days)
+        close = _download_daily_yf(
+            ticker=ticker,
+            lookback_days=req.lookback_days,
+            max_tries=ORACLE_MAX_TRIES,
+            sleep_try=ORACLE_SLEEP_TRY,
+        )
+
+        feats = _oracle_compute_from_closes(
+            asset_type=asset_type,
+            market=market,
+            ticker=ticker,
+            close=close,
+            lookback_days=req.lookback_days,
+        )
 
         expires = now + int(ttl)
         _ORACLE_CACHE.set(
@@ -718,6 +754,7 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
                 row_json=json.dumps(feats, ensure_ascii=False),
             )
         )
+
         meta = {
             "oracle_source": source,
             "oracle_cache_hit": False,
@@ -727,9 +764,15 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
         return feats, meta
 
     except Exception as yf_err:
-        # 3) Fallback Stooq (cache separate key)
+        # 3) Fallback Stooq (cache séparé)
         source2 = "stooq"
-        key2 = OracleCache.make_key(asset_type, market, ticker, int(req.lookback_days), source2)
+        key2 = OracleCache.make_key(
+            asset_type=asset_type,
+            market=market,
+            ticker=ticker,
+            lookback_days=int(req.lookback_days),
+            source=source2,
+        )
 
         hit2 = _ORACLE_CACHE.get(key2, now_utc=now)
         if hit2 is not None:
@@ -744,11 +787,21 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
             return feats, meta
 
         try:
-            close2 = _download_daily_stooq(ticker, req.lookback_days, market=market)
+            close2 = _download_daily_stooq(
+                ticker=ticker,
+                lookback_days=req.lookback_days,
+                market=market,
+            )
             if len(close2) < req.lookback_days + 2:
                 raise RuntimeError(f"stooq insufficient closes len={len(close2)}")
 
-            feats2 = _oracle_compute_from_closes(asset_type, market, ticker, close2, req.lookback_days)
+            feats2 = _oracle_compute_from_closes(
+                asset_type=asset_type,
+                market=market,
+                ticker=ticker,
+                close=close2,
+                lookback_days=req.lookback_days,
+            )
 
             expires2 = now + int(ttl)
             _ORACLE_CACHE.set(
@@ -764,6 +817,7 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
                     row_json=json.dumps(feats2, ensure_ascii=False),
                 )
             )
+
             meta2 = {
                 "oracle_source": source2,
                 "oracle_cache_hit": False,
@@ -774,21 +828,12 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
             return feats2, meta2
 
         except Exception as stooq_err:
-            # ✅ Patch minimal: fallback final sur closes si Lovable les a envoyés
-            if req.closes:
-                closes = pd.Series(req.closes, dtype=float)
-                feats3 = _oracle_compute_from_closes(asset_type, market, ticker, closes, req.lookback_days)
-                meta3 = {
-                    "oracle_source": "provided_closes_fallback",
-                    "oracle_cache_hit": False,
-                    "oracle_yfinance_error": str(yf_err),
-                    "oracle_stooq_error": str(stooq_err),
-                }
-                return feats3, meta3
-
-            # sinon: erreur explicite
-            raise RuntimeError(f"yfinance failed ({yf_err}) and stooq failed ({stooq_err})")
-
+            #  Ici, on n’a plus de closes (sinon on serait déjà sorti au tout début),
+            # donc on ne peut rien faire d’intelligent.
+            raise RuntimeError(
+                f"yfinance failed ({yf_err}) and stooq failed ({stooq_err}) "
+                f"and no closes were provided for rescue mode"
+            )
 
 # =============================
 # Unsupervised scoring (IF + LOF) ✅ robust (no NaN) + coverage
@@ -1087,15 +1132,25 @@ def score(req: ScoreRequest, x_api_key: Optional[str] = Header(default=None, ali
         "- Renvoie features_final (à afficher) + oracle_used"
     ),
 )
-def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(default=None, alias="x-api-key")) -> Dict[str, Any]:
+def score_oracle(
+    req: ScoreOracleRequest,
+    x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
+) -> Dict[str, Any]:
     _require_api_key(x_api_key)
 
     lovable_feats = _features_dict(req.lovable)
+    ticker = lovable_feats.get("ticker")
+    has_closes = bool(req.closes)
+    n_closes = len(req.closes) if req.closes else 0
+    has_dates = bool(req.dates)
+    n_dates = len(req.dates) if req.dates else 0
+
     print(
-        f"[score_oracle] ticker={lovable_feats.get('ticker')} "
-        f"has_closes={bool(req.closes)} "
-        f"n_closes={len(req.closes) if req.closes else 0}"
+        f"[score_oracle] ticker={ticker} "
+        f"has_closes={has_closes} n_closes={n_closes} "
+        f"has_dates={has_dates} n_dates={n_dates}"
     )
+
     integrity_flags, integrity_critical = _integrity_flags(lovable_feats)
     unsup = _unsup_score(lovable_feats)
 
@@ -1153,13 +1208,18 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
     oracle_meta: Optional[Dict[str, Any]] = None
     oracle_mode = "none"  # none | rescue | recompute
 
+    # ---------- ORACLE CALL LOGIC ----------
     if should_oracle:
         oracle_used = True
 
-        # ✅ Mode choisi:
-        # - si Lovable fournit des closes => Oracle "rescue" (aucune dépendance externe)
-        # - sinon => Oracle "recompute" (tente yfinance/stooq)
-        if req.closes and len(req.closes) >= (req.lookback_days + 2):
+        # Condition stricte pour activer le "rescue" :
+        # - closes présent
+        # - assez long
+        # - dates cohérentes
+        enough_closes = has_closes and (n_closes >= (req.lookback_days + 2))
+        aligned_dates = (not has_dates) or (n_dates == n_closes)
+
+        if enough_closes and aligned_dates:
             oracle_mode = "rescue"
         else:
             oracle_mode = "recompute"
@@ -1168,8 +1228,8 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
             oreq = OracleRequest(
                 asset_type=lovable_feats.get("asset_type") or "equity",
                 market=lovable_feats.get("market") or "US",
-                ticker=lovable_feats.get("ticker"),
-                closes=req.closes if oracle_mode == "rescue" else None,  # ✅ clé
+                ticker=ticker,
+                closes=req.closes if oracle_mode == "rescue" else None,
                 dates=req.dates if oracle_mode == "rescue" else None,
                 lookback_days=req.lookback_days,
             )
@@ -1195,8 +1255,10 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
                     "unsup_status": unsup_status,
                     "missing_critical": missing_critical,
                     "integrity_critical": bool(integrity_critical),
-                    "has_closes": bool(req.closes),
-                    "closes_len": len(req.closes) if req.closes else 0,
+                    "has_closes": has_closes,
+                    "closes_len": n_closes,
+                    "has_dates": has_dates,
+                    "dates_len": n_dates,
                 },
             }
 
@@ -1232,8 +1294,10 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
             "unsup_status": unsup_status,
             "missing_critical": missing_critical,
             "integrity_critical": bool(integrity_critical),
-            "has_closes": bool(req.closes),
-            "closes_len": len(req.closes) if req.closes else 0,
+            "has_closes": has_closes,
+            "closes_len": n_closes,
+            "has_dates": has_dates,
+            "dates_len": n_dates,
         },
         "gating_debug": {
             "should_oracle": should_oracle,
@@ -1251,22 +1315,19 @@ def score_oracle(req: ScoreOracleRequest, x_api_key: Optional[str] = Header(defa
             "unsup_max_missing_ratio": UNSUP_MAX_MISSING_RATIO,
             "unsup_max_missing_count": UNSUP_MAX_MISSING_COUNT,
         },
+        "oracle_input_debug": {
+            "has_closes": has_closes,
+            "n_closes": n_closes,
+            "has_dates": has_dates,
+            "n_dates": n_dates,
+            "lookback_days": int(req.lookback_days),
+        },
     }
+
     if oracle_meta is not None:
         out["oracle_meta"] = oracle_meta
 
-    out["oracle_input_debug"] = {
-        "has_closes": bool(req.closes),
-        "n_closes": int(len(req.closes) if req.closes else 0),
-        "has_dates": bool(req.dates),
-        "n_dates": int(len(req.dates) if req.dates else 0),
-        "lookback_days": int(req.lookback_days),
-    }
-
     return out
-
-
-
 
 
 
