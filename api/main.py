@@ -934,8 +934,7 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
     z_if = (raw_if - mu_if) / (sg_if + 1e-12)
     z_lof = (raw_lof - mu_lof) / (sg_lof + 1e-12)
 
-    ensemble_normal = (w_if * z_if) + (w_lof * z_lof)
-    anomaly_score = float(-ensemble_normal)
+    anomaly_score = float((w_if * z_if) + (w_lof * z_lof))
 
     asset_type = (feats.get("asset_type") or "").strip().lower()
     thr = (thr_per_asset.get(asset_type) or thr_global) or {}
