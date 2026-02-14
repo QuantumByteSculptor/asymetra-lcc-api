@@ -1,6 +1,9 @@
 # api/main.py
 from __future__ import annotations
+import logging
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 import os
 import time
 import json
@@ -902,6 +905,7 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
     cfg = b.get("config", DEFAULT_CONFIG)
     cols = b.get("columns") or vector_columns(cfg)
 
+    # --- Coverage diagnostics ---
     missing_count, missing_ratio, missing_sample = _unsup_missing_coverage(feats, cfg, cols)
 
     models = b.get("models") or {}
@@ -910,10 +914,12 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
     if iforest is None or lof is None:
         raise RuntimeError("unsup bundle missing models.iforest / models.lof")
 
+    # --- Norm params (training μ/σ) ---
     score_norm = b.get("score_norm") or {}
     norm_if = score_norm.get("if") or {}
     norm_lof = score_norm.get("lof") or {}
 
+    # --- Thresholds & weights ---
     thr_global = b.get("thresholds_global") or {}
     thr_per_asset = b.get("thresholds_per_asset_type") or {}
 
@@ -924,18 +930,40 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
     # --- Build vector ---
     X = _unsup_vector_numpy(feats, cfg, cols)
 
-    # --- Apply SAME imputer as training ---
-    imputer_block = b.get("imputer", {})
+    # --- Apply SAME imputer as training if present ---
+    imputer_block = b.get("imputer", {}) or {}
     imputer = imputer_block.get("object")
 
     if imputer is not None:
-        X = imputer.transform(X)
+        try:
+            X = imputer.transform(X)
+        except Exception as e:
+            logger.warning(f"[UNSUP] imputer.transform failed -> fallback nan-median. err={e!r}")
+            # Fallback simple (robuste)
+            if np.isnan(X).any():
+                for j in range(X.shape[1]):
+                    col = X[:, j]
+                    if np.all(np.isnan(col)):
+                        X[:, j] = 0.0
+                    else:
+                        med = np.nanmedian(col)
+                        X[np.isnan(col), j] = med
+    else:
+        # Pas d'imputer dans le bundle -> fallback simple (ne devrait pas arriver en v2)
+        if np.isnan(X).any():
+            for j in range(X.shape[1]):
+                col = X[:, j]
+                if np.all(np.isnan(col)):
+                    X[:, j] = 0.0
+                else:
+                    med = np.nanmedian(col)
+                    X[np.isnan(col), j] = med
 
     # --- Raw scores (same convention as training) ---
     raw_if = float(np.asarray(iforest.score_samples(X), dtype=float)[0])
     raw_lof = float(np.asarray(lof.score_samples(X), dtype=float)[0])
 
-    # --- Normalisation (use TRAINING μ / σ) ---
+    # --- Normalisation ---
     mu_if = float(norm_if.get("mu", 0.0))
     sg_if = float(norm_if.get("sigma", 1.0)) or 1.0
     mu_lof = float(norm_lof.get("mu", 0.0))
@@ -946,6 +974,7 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
 
     anomaly_score = float((w_if * z_if) + (w_lof * z_lof))
 
+    # --- Pick thresholds (global or per asset_type) ---
     asset_type = (feats.get("asset_type") or "").strip().lower()
     thr = (thr_per_asset.get(asset_type) or thr_global) or {}
     warn_thr = float(thr.get("warn", thr.get("WARN", 0.0)))
@@ -956,6 +985,19 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
         status = "BLOCK"
     elif anomaly_score >= warn_thr:
         status = "WARN"
+
+    # --- DEBUG logs: prove what ran + which params were used ---
+    meta = b.get("meta", {}) or {}
+    logger.info(f"[UNSUP] bundle_meta={meta}")
+    logger.info(f"[UNSUP] score_norm={score_norm}")
+    logger.info(
+        f"[UNSUP] raw_if={raw_if:.6f} raw_lof={raw_lof:.6f} "
+        f"mu_if={mu_if:.6f} sg_if={sg_if:.6f} mu_lof={mu_lof:.6f} sg_lof={sg_lof:.6f} "
+        f"z_if={float(z_if):.4f} z_lof={float(z_lof):.4f} "
+        f"w_if={w_if:.3f} w_lof={w_lof:.3f} ensemble={anomaly_score:.4f} status={status} "
+        f"thr_warn={warn_thr:.4f} thr_block={block_thr:.4f} "
+        f"missing_ratio={missing_ratio:.3f} n_cols={len(cols)}"
+    )
 
     return {
         "raw_if": raw_if,
@@ -970,7 +1012,16 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
         "missing_ratio": float(missing_ratio),
         "missing_cols_sample": missing_sample,
         "n_cols": int(len(cols)),
+        # Optionnel: super utile tant que tu debug
+        "debug": {
+            "bundle_meta": meta,
+            "score_norm": score_norm,
+            "weights": {"if": w_if, "lof": w_lof},
+            "thr_source": "per_asset" if asset_type in (thr_per_asset or {}) else "global",
+        },
     }
+
+
 
 
 # =============================
