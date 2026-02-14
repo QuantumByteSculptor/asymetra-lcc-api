@@ -921,11 +921,21 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
     w_if = float(w.get("if", 0.5))
     w_lof = float(w.get("lof", 0.5))
 
+    # --- Build vector ---
     X = _unsup_vector_numpy(feats, cfg, cols)
 
+    # --- Apply SAME imputer as training ---
+    imputer_block = b.get("imputer", {})
+    imputer = imputer_block.get("object")
+
+    if imputer is not None:
+        X = imputer.transform(X)
+
+    # --- Raw scores (same convention as training) ---
     raw_if = float(np.asarray(iforest.score_samples(X), dtype=float)[0])
     raw_lof = float(np.asarray(lof.score_samples(X), dtype=float)[0])
 
+    # --- Normalisation (use TRAINING μ / σ) ---
     mu_if = float(norm_if.get("mu", 0.0))
     sg_if = float(norm_if.get("sigma", 1.0)) or 1.0
     mu_lof = float(norm_lof.get("mu", 0.0))

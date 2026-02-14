@@ -137,7 +137,7 @@ def main() -> None:
     lof.fit(X_imp)
 
     # raw scores
-    # IF: score_samples (higher = less anomalous chez sklearn), mais toi tu z-normalises ensuite
+    # IF: score_samples (higher = less anomalous chez sklearn)
     raw_if = iforest.score_samples(X_imp).astype(float)
 
     # LOF: score_samples existe avec novelty=True (higher = less anomalous)
@@ -160,7 +160,6 @@ def main() -> None:
 
     # thresholds per asset_type si présent dans la source (sinon global)
     per_asset: Dict[str, Dict[str, float]] = {}
-    # on essaie de récupérer asset_type depuis feats_list
     by_at: Dict[str, List[float]] = {}
     for f, s in zip(feats_list, s_ens):
         at = (f.get("asset_type") or "").strip().lower()
@@ -176,14 +175,16 @@ def main() -> None:
 
     bundle = {
         "config": cfg,
-        # ✅ colonnes ACTIVES (après drop des fully-NaN)
+        # ✅ Schéma “vérité” pour le scoring (ordre EXACT + colonnes actives)
+        # (compat: on garde "columns", et on ajoute une clé explicite pour score_broken.py)
         "columns": cols,
+        "feature_columns": cols,  # ✅ PATCH CRITIQUE: le scorer doit lire ça
         "models": {
             "iforest": iforest,
             "lof": lof,
         },
         "imputer": {
-            # SimpleImputer ne se sérialise pas toujours bien selon versions, on stocke l’objet + stats
+            # SimpleImputer: on stocke l’objet + stats
             "object": imputer,
             "statistics": getattr(imputer, "statistics_", None),
         },
@@ -199,7 +200,7 @@ def main() -> None:
         "thresholds_global": thr_global,
         "thresholds_per_asset_type": per_asset,
         "meta": {
-            "version": "unsup_v2_drop_allnan_cols",
+            "version": "unsup_v2_drop_allnan_cols_schema_pinned",
             "n_rows": int(X_imp.shape[0]),
             "n_features": int(X_imp.shape[1]),
             "warn_q": float(args.warn_q),
@@ -212,7 +213,10 @@ def main() -> None:
 
     print(f"Saved bundle to {args.out}")
     print(f"Global thresholds: WARN>={thr_global['warn']:.4f}, BLOCK>={thr_global['block']:.4f}")
-    print(f"Score norm: IF(mu={norm_if['mu']:.6f}, sigma={norm_if['sigma']:.6f}) LOF(mu={norm_lof['mu']:.6f}, sigma={norm_lof['sigma']:.6f})")
+    print(
+        f"Score norm: IF(mu={norm_if['mu']:.6f}, sigma={norm_if['sigma']:.6f}) "
+        f"LOF(mu={norm_lof['mu']:.6f}, sigma={norm_lof['sigma']:.6f})"
+    )
     if per_asset:
         print("Per-asset thresholds:")
         for k in sorted(per_asset.keys()):
@@ -224,3 +228,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
