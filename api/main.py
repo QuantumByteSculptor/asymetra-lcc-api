@@ -683,7 +683,7 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
             asset_type=asset_type,
             market=market,
             ticker=ticker or None,  # ticker facultatif, purement informatif
-            close=closes,
+            closes=closes,
             lookback_days=req.lookback_days,
         )
 
@@ -739,7 +739,7 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
             asset_type=asset_type,
             market=market,
             ticker=ticker,
-            close=close,
+            closes=close,
             lookback_days=req.lookback_days,
         )
 
@@ -802,7 +802,7 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
                 asset_type=asset_type,
                 market=market,
                 ticker=ticker,
-                close=close2,
+                closes=close2,
                 lookback_days=req.lookback_days,
             )
 
