@@ -53,7 +53,7 @@ UNSUP_MAX_MISSING_COUNT = int(os.getenv("UNSUP_MAX_MISSING_COUNT", "0"))  # 0 = 
 # =============================
 # FastAPI
 # =============================
-app = FastAPI(title="Asymetra LCC API", version="1.7.2-lookbackfix-deploytest")
+app = FastAPI(title="Asymetra LCC API", version="1.7.2")
 
 
 # =============================
