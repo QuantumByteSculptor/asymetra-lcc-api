@@ -53,7 +53,7 @@ UNSUP_MAX_MISSING_COUNT = int(os.getenv("UNSUP_MAX_MISSING_COUNT", "0"))  # 0 = 
 # =============================
 # FastAPI
 # =============================
-app = FastAPI(title="Asymetra LCC API", version="1.7.1-rescuefix-deploytest")
+app = FastAPI(title="Asymetra LCC API", version="1.7.2-lookbackfix-deploytest")
 
 
 # =============================
@@ -1192,6 +1192,7 @@ def score(req: ScoreRequest, x_api_key: Optional[str] = Header(default=None, ali
         "- Renvoie features_final (à afficher) + oracle_used"
     ),
 )
+
 def score_oracle(
     req: ScoreOracleRequest,
     x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
@@ -1205,10 +1206,17 @@ def score_oracle(
     has_dates = bool(req.dates)
     n_dates = len(req.dates) if req.dates else 0
 
+    # ✅ PATCH: utilise le lookback le plus “vrai”
+    # - priorité à lovable.lookback_days (c’est ce que le frontend veut analyser)
+    # - sinon fallback sur req.lookback_days (champ top-level du ScoreOracleRequest)
+    # - sinon 252
+    effective_lookback = int(lovable_feats.get("lookback_days") or req.lookback_days or 252)
+
     print(
         f"[score_oracle] ticker={ticker} "
         f"has_closes={has_closes} n_closes={n_closes} "
-        f"has_dates={has_dates} n_dates={n_dates}"
+        f"has_dates={has_dates} n_dates={n_dates} "
+        f"effective_lookback={effective_lookback}"
     )
 
     integrity_flags, integrity_critical = _integrity_flags(lovable_feats)
@@ -1226,8 +1234,9 @@ def score_oracle(
 
     unsup_status = "SKIP" if unsup_skip else str(unsup["status"])
 
+    # (avant oracle) missing critical sur lovable
     critical = ["var95", "var99", "es95", "vol_ann", "max_drawdown"]
-    missing_critical = [k for k in critical if _safe_float(lovable_feats.get(k)) is None]
+    missing_critical_before = [k for k in critical if _safe_float(lovable_feats.get(k)) is None]
 
     xgb = _xgb_shadow_score(lovable_feats)
     xgb_ok_relaxes = False
@@ -1243,17 +1252,18 @@ def score_oracle(
     should_oracle = False
     reasons: Dict[str, Any] = {
         "force_oracle": bool(req.force_oracle),
-        "missing_critical": bool(missing_critical),
+        "missing_critical": bool(missing_critical_before),
         "integrity_critical": bool(integrity_critical),
         "unsup_skip": bool(unsup_skip),
         "unsup_status": unsup_status,
+        "effective_lookback": int(effective_lookback),
     }
 
     if req.force_oracle:
         should_oracle = True
     elif integrity_critical:
         should_oracle = True
-    elif missing_critical:
+    elif missing_critical_before:
         should_oracle = True
     elif unsup_skip:
         should_oracle = True
@@ -1274,15 +1284,12 @@ def score_oracle(
 
         # Condition stricte pour activer le "rescue" :
         # - closes présent
-        # - assez long
+        # - assez long pour le lookback EFFECTIF (et pas le default 252)
         # - dates cohérentes
-        enough_closes = has_closes and (n_closes >= (req.lookback_days + 2))
+        enough_closes = has_closes and (n_closes >= (effective_lookback + 2))
         aligned_dates = (not has_dates) or (n_dates == n_closes)
 
-        if enough_closes and aligned_dates:
-            oracle_mode = "rescue"
-        else:
-            oracle_mode = "recompute"
+        oracle_mode = "rescue" if (enough_closes and aligned_dates) else "recompute"
 
         try:
             oreq = OracleRequest(
@@ -1291,7 +1298,7 @@ def score_oracle(
                 ticker=ticker,
                 closes=req.closes if oracle_mode == "rescue" else None,
                 dates=req.dates if oracle_mode == "rescue" else None,
-                lookback_days=req.lookback_days,
+                lookback_days=effective_lookback,  # ✅ PATCH
             )
             oracle_feats, oracle_meta = _oracle_analyze(oreq)
         except Exception as e:
@@ -1302,7 +1309,7 @@ def score_oracle(
                 "oracle_failed": True,
                 "oracle_error": str(e),
                 "unsup_status": unsup_status,
-                "missing_critical": missing_critical,
+                "missing_critical": missing_critical_before,
                 "integrity_flags": integrity_flags,
                 "integrity_critical_flags": integrity_critical,
                 "xgb_shadow": xgb,
@@ -1313,25 +1320,37 @@ def score_oracle(
                     "warn_is_shallow": warn_is_shallow,
                     "xgb_ok_relaxes": xgb_ok_relaxes,
                     "unsup_status": unsup_status,
-                    "missing_critical": missing_critical,
+                    "missing_critical": missing_critical_before,
                     "integrity_critical": bool(integrity_critical),
                     "has_closes": has_closes,
                     "closes_len": n_closes,
                     "has_dates": has_dates,
                     "dates_len": n_dates,
+                    "effective_lookback": int(effective_lookback),
                 },
             }
 
+    # ✅ PATCH: features_final + missing_critical recalculé SUR CE QU’ON RETOURNE
     features_final = oracle_feats if oracle_feats is not None else lovable_feats
+    missing_critical_final = [k for k in critical if _safe_float(features_final.get(k)) is None]
+
+    # (optionnel mais pratique): unsup recalculé après oracle
+    unsup_after_oracle = _unsup_score(features_final) if oracle_feats is not None else None
 
     out: Dict[str, Any] = {
         "features_final": features_final,
         "oracle_used": oracle_used,
         "oracle_mode": oracle_mode,
+
+        # unsup_status = état de Lovable (avant oracle)
         "unsup_status": unsup_status,
-        "missing_critical": missing_critical,
+
+        # ✅ PATCH: expose le vrai missing critical final (et garde before dans trace/debug)
+        "missing_critical": missing_critical_final,
+
         "integrity_flags": integrity_flags,
         "integrity_critical_flags": integrity_critical,
+
         "debug_unsup": {
             "raw_if": unsup.get("raw_if"),
             "raw_lof": unsup.get("raw_lof"),
@@ -1344,7 +1363,12 @@ def score_oracle(
             "missing_cols_sample": unsup.get("missing_cols_sample"),
             "n_cols": unsup.get("n_cols"),
         },
+
+        # optionnel: état unsup sur features_final
+        "debug_unsup_after_oracle": unsup_after_oracle,
+
         "xgb_shadow": xgb,
+
         "decision_trace": {
             "should_oracle": should_oracle,
             "oracle_mode": oracle_mode,
@@ -1352,13 +1376,19 @@ def score_oracle(
             "warn_is_shallow": warn_is_shallow,
             "xgb_ok_relaxes": xgb_ok_relaxes,
             "unsup_status": unsup_status,
-            "missing_critical": missing_critical,
+
+            # garde les deux pour audit
+            "missing_critical_before": missing_critical_before,
+            "missing_critical_final": missing_critical_final,
+
             "integrity_critical": bool(integrity_critical),
             "has_closes": has_closes,
             "closes_len": n_closes,
             "has_dates": has_dates,
             "dates_len": n_dates,
+            "effective_lookback": int(effective_lookback),
         },
+
         "gating_debug": {
             "should_oracle": should_oracle,
             "reasons": reasons,
@@ -1375,12 +1405,15 @@ def score_oracle(
             "unsup_max_missing_ratio": UNSUP_MAX_MISSING_RATIO,
             "unsup_max_missing_count": UNSUP_MAX_MISSING_COUNT,
         },
+
         "oracle_input_debug": {
             "has_closes": has_closes,
             "n_closes": n_closes,
             "has_dates": has_dates,
             "n_dates": n_dates,
-            "lookback_days": int(req.lookback_days),
+            # ✅ on expose les deux pour clarté
+            "lookback_days_req": int(req.lookback_days),
+            "lookback_days_effective": int(effective_lookback),
         },
     }
 
@@ -1388,6 +1421,9 @@ def score_oracle(
         out["oracle_meta"] = oracle_meta
 
     return out
+
+
+
 
 
 
