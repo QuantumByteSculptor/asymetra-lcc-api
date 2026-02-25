@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -12,6 +13,14 @@ import pandas as pd
 from sklearn.ensemble import IsolationForest
 from sklearn.impute import SimpleImputer
 from sklearn.neighbors import LocalOutlierFactor
+
+# ------------------------------------------------------------------
+# Ensure repo root is on sys.path so we import local features.py
+# (avoid collision with pip package named "features")
+# ------------------------------------------------------------------
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from features import DEFAULT_CONFIG, features_to_row, vector_columns
 
@@ -40,9 +49,10 @@ def build_df(feats_list: List[Dict[str, Any]], cfg: Dict[str, Any]) -> pd.DataFr
     for f in feats_list:
         row = features_to_row(f, cfg=cfg)
         recs.append(row)
+
     df = pd.DataFrame.from_records(recs)
 
-    # assure toutes les colonnes (ordre stable)
+    # ensure all columns exist
     for c in cols:
         if c not in df.columns:
             df[c] = np.nan
@@ -54,7 +64,7 @@ def build_df(feats_list: List[Dict[str, Any]], cfg: Dict[str, Any]) -> pd.DataFr
 def drop_all_nan_columns(df: pd.DataFrame, cols: List[str]) -> Tuple[pd.DataFrame, List[str]]:
     all_nan = [c for c in cols if df[c].isna().all()]
     if all_nan:
-        print(f"⚠️ Dropping fully-NaN columns before impute: {all_nan}")
+        print(f"Dropping fully-NaN columns before impute: {all_nan}")
         df = df.drop(columns=all_nan)
         cols = [c for c in cols if c not in all_nan]
     return df, cols
@@ -67,7 +77,6 @@ def compute_z_norm_params(x: np.ndarray) -> Dict[str, float]:
 
 
 def choose_thresholds(scores: np.ndarray, warn_q: float, block_q: float) -> Dict[str, float]:
-    # scores = ensemble (plus grand = plus anormal chez toi)
     warn = float(np.quantile(scores, warn_q))
     block = float(np.quantile(scores, block_q))
     return {"warn": warn, "block": block}
@@ -78,21 +87,17 @@ def choose_thresholds(scores: np.ndarray, warn_q: float, block_q: float) -> Dict
 # -----------------------------
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True, help="JSONL path for OK samples (unsup training)")
+    ap.add_argument("--input", required=True, help="JSONL path (unsup training)")
     ap.add_argument("--out", default="models/unsup_bundle.joblib", help="Output bundle path")
 
-    # models
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--if_estimators", type=int, default=300)
     ap.add_argument("--if_contamination", type=float, default=0.01)
-
     ap.add_argument("--lof_neighbors", type=int, default=35)
 
-    # thresholds (quantiles sur OK)
     ap.add_argument("--warn_q", type=float, default=0.95)
     ap.add_argument("--block_q", type=float, default=0.99)
 
-    # ensemble
     ap.add_argument("--w_if", type=float, default=0.5)
     ap.add_argument("--w_lof", type=float, default=0.5)
 
@@ -105,20 +110,28 @@ def main() -> None:
     if not feats_list:
         raise SystemExit("No rows loaded. Check your --input JSONL.")
 
-    # build numeric matrix
+    # ------------------------------------------------------------
+    # NEW: filter to clean samples if label_v2 exists
+    # ------------------------------------------------------------
+    if feats_list and isinstance(feats_list[0], dict) and "label_v2" in feats_list[0]:
+        before = len(feats_list)
+        feats_list = [x for x in feats_list if x.get("label_v2") == "ok"]
+        after = len(feats_list)
+        print(f"[train_unsupervised] filtered label_v2=ok: {before} -> {after}")
+
+        if not feats_list:
+            raise SystemExit("After filtering label_v2=ok, no rows remain.")
+
+    # build matrix
     cols = vector_columns(cfg)
     df = build_df(feats_list, cfg=cfg)
-
-    # drop fully-NaN columns (=> supprime tes warnings)
     df, cols = drop_all_nan_columns(df, cols)
 
     X = df.to_numpy(dtype=float)
 
-    # impute median
     imputer = SimpleImputer(strategy="median")
     X_imp = imputer.fit_transform(X)
 
-    # models
     iforest = IsolationForest(
         n_estimators=args.if_estimators,
         contamination=args.if_contamination,
@@ -126,7 +139,6 @@ def main() -> None:
         n_jobs=-1,
     )
 
-    # IMPORTANT: novelty=True pour scorer sur de nouvelles lignes en production
     lof = LocalOutlierFactor(
         n_neighbors=args.lof_neighbors,
         novelty=True,
@@ -136,31 +148,24 @@ def main() -> None:
     iforest.fit(X_imp)
     lof.fit(X_imp)
 
-    # raw scores
-    # IF: score_samples (higher = less anomalous chez sklearn)
     raw_if = iforest.score_samples(X_imp).astype(float)
-
-    # LOF: score_samples existe avec novelty=True (higher = less anomalous)
     raw_lof = lof.score_samples(X_imp).astype(float)
 
-    # z-normalisation
     norm_if = compute_z_norm_params(raw_if)
     norm_lof = compute_z_norm_params(raw_lof)
 
     z_if = (raw_if - norm_if["mu"]) / (norm_if["sigma"] + 1e-12)
     z_lof = (raw_lof - norm_lof["mu"]) / (norm_lof["sigma"] + 1e-12)
 
-    # ensemble (ton ADN: mélange IF + LOF)
     w_if = float(args.w_if)
     w_lof = float(args.w_lof)
     s_ens = (w_if * z_if) + (w_lof * z_lof)
 
-    # thresholds global (sur OK)
     thr_global = choose_thresholds(s_ens, args.warn_q, args.block_q)
 
-    # thresholds per asset_type si présent dans la source (sinon global)
     per_asset: Dict[str, Dict[str, float]] = {}
     by_at: Dict[str, List[float]] = {}
+
     for f, s in zip(feats_list, s_ens):
         at = (f.get("asset_type") or "").strip().lower()
         if not at:
@@ -175,20 +180,16 @@ def main() -> None:
 
     bundle = {
         "config": cfg,
-        # ✅ Schéma “vérité” pour le scoring (ordre EXACT + colonnes actives)
-        # (compat: on garde "columns", et on ajoute une clé explicite pour score_broken.py)
         "columns": cols,
-        "feature_columns": cols,  # ✅ PATCH CRITIQUE: le scorer doit lire ça
+        "feature_columns": cols,
         "models": {
             "iforest": iforest,
             "lof": lof,
         },
         "imputer": {
-            # SimpleImputer: on stocke l’objet + stats
             "object": imputer,
             "statistics": getattr(imputer, "statistics_", None),
         },
-        # ✅ keys en minuscules (évite ton bug 'IF')
         "score_norm": {
             "if": norm_if,
             "lof": norm_lof,
@@ -200,7 +201,7 @@ def main() -> None:
         "thresholds_global": thr_global,
         "thresholds_per_asset_type": per_asset,
         "meta": {
-            "version": "unsup_v2_drop_allnan_cols_schema_pinned",
+            "version": "unsup_v3_label_v2_clean_filter",
             "n_rows": int(X_imp.shape[0]),
             "n_features": int(X_imp.shape[1]),
             "warn_q": float(args.warn_q),
@@ -217,16 +218,14 @@ def main() -> None:
         f"Score norm: IF(mu={norm_if['mu']:.6f}, sigma={norm_if['sigma']:.6f}) "
         f"LOF(mu={norm_lof['mu']:.6f}, sigma={norm_lof['sigma']:.6f})"
     )
-    if per_asset:
-        print("Per-asset thresholds:")
-        for k in sorted(per_asset.keys()):
-            t = per_asset[k]
-            print(f"  - {k}: WARN>={t['warn']:.4f}, BLOCK>={t['block']:.4f} (n={len(by_at.get(k, []))})")
-    else:
-        print("Per-asset thresholds: none (not enough data per asset_type)")
 
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
 
 
