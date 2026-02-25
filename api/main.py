@@ -1,16 +1,27 @@
 # api/main.py
 from __future__ import annotations
+
 import logging
+import sys
+from pathlib import Path
+
+# ------------------------------------------------------------------
+# Ensure repo root is on sys.path so we import local features.py
+# (avoid collision with pip package named "features")
+# ------------------------------------------------------------------
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 import os
 import time
 import json
 import sqlite3
 import io
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
 import joblib
