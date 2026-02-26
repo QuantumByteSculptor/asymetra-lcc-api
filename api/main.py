@@ -84,7 +84,7 @@ DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True
 # =============================
 # FastAPI
 # =============================
-app = FastAPI(title="Asymetra LCC API", version="1.8.7")
+app = FastAPI(title="Asymetra LCC API", version="1.8.8")
 
 
 
@@ -240,6 +240,13 @@ def _features_dict(req: ScoreRequest) -> Dict[str, Any]:
 
 def _utc_now() -> int:
     return int(time.time())
+
+def _err500(where: str, exc: Exception):
+    import uuid
+    error_id = str(uuid.uuid4())[:8]
+    logger.exception(f"[ERR500:{error_id}] {where} -> {type(exc).__name__}: {exc}")
+    # keep response stable + machine-readable
+    raise HTTPException(status_code=500, detail={"message": "Internal Server Error", "error_id": error_id})
 
 
 # =============================
