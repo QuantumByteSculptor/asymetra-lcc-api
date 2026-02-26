@@ -2,35 +2,36 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+import joblib
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
-import joblib
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
+# ============================================================
+# Price adapters
+# ============================================================
 def _as_close_series(df: pd.DataFrame, ticker: str) -> pd.Series:
     """
-    yfinance peut renvoyer:
-      - colonnes simples (Close)
-      - MultiIndex (('Close','AAPL'), ...)
-    On retourne toujours une Series de close.
+    yfinance can return:
+      - single-level columns ("Close")
+      - MultiIndex columns (("Close","AAPL"), ...)
+    Always returns a clean Close series.
     """
     if df is None or df.empty:
         return pd.Series(dtype=float)
 
-    # MultiIndex: df["Close"] => DataFrame avec colonne ticker
     if isinstance(df.columns, pd.MultiIndex):
         if ("Close", ticker) in df.columns:
-            return df[("Close", ticker)].dropna()
+            return pd.Series(df[("Close", ticker)]).dropna()
 
         if "Close" in df.columns.get_level_values(0):
             close_df = df["Close"]
@@ -40,7 +41,6 @@ def _as_close_series(df: pd.DataFrame, ticker: str) -> pd.Series:
                 return close_df.iloc[:, 0].dropna()
             return pd.Series(close_df).dropna()
 
-    # colonnes simples
     if "Close" in df.columns:
         s = df["Close"]
         if isinstance(s, pd.Series):
@@ -53,13 +53,15 @@ def _as_close_series(df: pd.DataFrame, ticker: str) -> pd.Series:
     return pd.Series(dtype=float)
 
 
+# ============================================================
+# Stats
+# ============================================================
 def rsi(series: pd.Series, period: int = 14) -> float:
     x = series.diff()
     up = x.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
     down = (-x.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean()
     rs = up / (down + 1e-12)
-    val = 100 - (100 / (1 + rs.iloc[-1]))
-    return float(val)
+    return float(100 - (100 / (1 + rs.iloc[-1])))
 
 
 def max_drawdown(prices: pd.Series) -> float:
@@ -77,8 +79,7 @@ def realized_vol_ann(returns: pd.Series) -> float:
 
 def var_es(returns: pd.Series, q: float) -> Tuple[float, float]:
     """
-    returns: simple returns
-    convention: VaR/ES en "loss magnitude" positive (loss=-ret)
+    Convention: VaR/ES as positive loss magnitude (loss = -return).
     """
     losses = (-returns).dropna().to_numpy(dtype=float)
     if len(losses) < 30:
@@ -89,9 +90,9 @@ def var_es(returns: pd.Series, q: float) -> Tuple[float, float]:
     return v, es
 
 
-# -----------------------------
-# Label rules (future-based)
-# -----------------------------
+# ============================================================
+# Labels (future-based)
+# ============================================================
 @dataclass
 class LabelRules:
     horizon_days: int = 20
@@ -121,9 +122,9 @@ def label_from_future(
     return "ok"
 
 
-# -----------------------------
-# Unsupervised z-scores
-# -----------------------------
+# ============================================================
+# Unsupervised bundle -> inject z scores
+# ============================================================
 def load_unsup_bundle(path: str) -> Dict[str, Any]:
     b = joblib.load(path)
     models = b.get("models") or {}
@@ -140,51 +141,43 @@ def load_unsup_bundle(path: str) -> Dict[str, Any]:
 
 def add_unsup_zscores_inplace(feats: Dict[str, Any], unsup: Dict[str, Any]) -> None:
     """
-    Ajoute:
+    Adds:
       - raw_if, raw_lof
       - z_if, z_lof
       - z_gap_if_lof
 
-    PATCH IMPORTANT:
-      - On passe un numpy array aux modèles (pas DataFrame) => pas de warning sklearn
-      - Imputation robuste colonne par colonne:
-          * si une colonne est 100% NaN -> 0.0 (sans warning)
-          * sinon -> médiane
+    Single-row safe:
+      - missing/non-finite values are coerced to 0.0
+      - numpy array only (no DataFrame)
     """
-    cols: List[str] = unsup["columns"]
+    cols: List[str] = list(unsup["columns"])
     iforest = unsup["models"]["iforest"]
     lof = unsup["models"]["lof"]
     score_norm = unsup["score_norm"]
 
-    # row dans l'ordre exact des colonnes du bundle
     row: List[float] = []
     for c in cols:
         v = feats.get(c)
 
-        # alias de compat
         if v is None and c == "max_dd":
             v = feats.get("max_drawdown")
         if v is None and c == "max_drawdown":
             v = feats.get("max_dd")
 
-        row.append(np.nan if v is None else float(v))
+        try:
+            fv = float(v)
+            if not np.isfinite(fv):
+                fv = 0.0
+        except Exception:
+            fv = 0.0
+
+        row.append(fv)
 
     X = np.asarray([row], dtype=float)
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # ---- PATCH (robuste): imputation colonne par colonne ----
-    if np.isnan(X).any():
-        for j in range(X.shape[1]):
-            col = X[:, j]
-            if np.all(np.isnan(col)):
-                X[:, j] = 0.0
-            else:
-                med = np.nanmedian(col)
-                X[np.isnan(col), j] = med
-    # --------------------------------------------------------
-
-    # score_samples renvoie (n,)
-    raw_if = float(np.asarray(iforest.score_samples(X))[0])
-    raw_lof = float(np.asarray(lof.score_samples(X))[0])
+    raw_if = float(np.asarray(iforest.score_samples(X), dtype=float)[0])
+    raw_lof = float(np.asarray(lof.score_samples(X), dtype=float)[0])
 
     mu_if = float(score_norm["if"]["mu"])
     sd_if = float(score_norm["if"]["sigma"] or 1e-12)
@@ -201,9 +194,9 @@ def add_unsup_zscores_inplace(feats: Dict[str, Any], unsup: Dict[str, Any]) -> N
     feats["z_gap_if_lof"] = float(z_if - z_lof)
 
 
-# -----------------------------
-# Feature building (daily)
-# -----------------------------
+# ============================================================
+# Feature engineering (per window)
+# ============================================================
 def build_features(
     ticker: str,
     asset_type: str,
@@ -218,7 +211,6 @@ def build_features(
 
     vol_20d = float(np.std(ret20.to_numpy(dtype=float), ddof=1))
     vol_ann = realized_vol_ann(ret252)
-
     mdd = max_drawdown(closes)
 
     v95, e95 = var_es(ret252, 0.95)
@@ -228,65 +220,164 @@ def build_features(
     missing_pct = float(1.0 - (n_used / 252.0))
     missing_pct = float(max(0.0, min(1.0, missing_pct)))
 
-    # v1: neutre (tu peux faire corr vs index proxy ensuite)
     corr_mkt = 0.0
-
-    # compat pipeline: max_dd + max_drawdown
     max_dd = float(mdd)
 
-    # features dérivées
-    dd_to_var99 = None
-    if np.isfinite(v99):
+    dd_to_var99: Optional[float] = None
+    if np.isfinite(v99) and float(v99) > 0:
         dd_to_var99 = float(abs(max_dd) / (float(v99) + 1e-12))
 
-    tuw_per_dd = float(95.0 / (abs(max_dd) + 1e-6))
+    tuw_pct = 95.0
+    tuw_per_dd = float(tuw_pct / (abs(max_dd) + 1e-6))
 
-    feats: Dict[str, Any] = {
-        "asset_type": asset_type,
-        "market": market,
-        "ticker": ticker,
-
-        "vol_ann": float(vol_ann),
-        "vol_20d": float(vol_20d),
-
+    return {
+        "asset_type": (asset_type or "").strip().lower(),
+        "market": (market or "").strip().upper(),
+        "ticker": (ticker or "").strip(),
+        "vol_ann": float(vol_ann) if np.isfinite(vol_ann) else None,
+        "vol_20d": float(vol_20d) if np.isfinite(vol_20d) else None,
         "max_drawdown": float(max_dd),
         "max_dd": float(max_dd),
-
         "corr_mkt": float(corr_mkt),
-
         "var95": float(v95) if np.isfinite(v95) else None,
         "var99": float(v99) if np.isfinite(v99) else None,
         "es95": float(e95) if np.isfinite(e95) else None,
         "es99": float(e99) if np.isfinite(e99) else None,
-
         "n_used": int(n_used),
         "missing_pct": float(missing_pct),
-
-        "tuw_pct": 95.0,
+        "tuw_pct": float(tuw_pct),
         "tail_obs_99": int(max(0, np.sum((-ret252).to_numpy(dtype=float) >= (v99 if np.isfinite(v99) else 1e9)))),
-        "rsi": float(rsi(closes)),
-
+        "rsi": float(rsi(closes)) if len(closes) >= 20 else None,
         "dd_to_var99": dd_to_var99,
         "tuw_per_dd": tuw_per_dd,
     }
-    return feats
 
 
-# -----------------------------
-# Download with retries
-# -----------------------------
-def download_daily(
-    ticker: str,
-    start: str,
-    end: Optional[str],
-    max_tries: int,
-    sleep_try: float,
-) -> pd.DataFrame:
-    last_err = None
+# ============================================================
+# Provider logic (stooq-first; yfinance fallback)
+# ============================================================
+def should_skip_ticker_for_training(ticker: str) -> Optional[str]:
+    """
+    Excludes instruments that often trigger provider quirks:
+      - indices: ^GSPC, ^NDX, ...
+      - FX pairs: EURUSD=X, ...
+      - futures: GC=F, CL=F, ...
+    """
+    t = (ticker or "").strip()
+    if not t:
+        return "empty"
+    if t.startswith("^"):
+        return "index"
+    if t.endswith("=X"):
+        return "fx_pair"
+    if t.endswith("=F"):
+        return "future"
+    return None
+
+
+def _stooq_symbol_candidates(ticker: str, market: str) -> List[str]:
+    """
+    Stooq is picky about symbols.
+    For US-listed tickers, 'TICKER.US' is often the reliable form,
+    even when your universe tags them as GLOBAL/EU by "asset exposure".
+    """
+    t = (ticker or "").strip()
+    m = (market or "").strip().upper()
+
+    cands: List[str] = []
+
+    # market-based first guess
+    if "." not in t and m == "US":
+        cands.append(f"{t}.US")
+    else:
+        cands.append(t)
+
+    # pragmatic fallback: try US suffix if ticker has no suffix
+    if "." not in t:
+        cands.append(f"{t}.US")
+
+    # de-dup, keep order
+    out: List[str] = []
+    seen = set()
+    for s in cands:
+        s2 = s.strip()
+        if not s2:
+            continue
+        k = s2.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(s2)
+    return out
+
+
+def _download_stooq_close(ticker: str, market: str) -> pd.Series:
+    """
+    Stooq CSV downloader with a browser-like UA.
+    Tries multiple symbol candidates (ex: EFA -> EFA.US).
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/csv,text/plain;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "close",
+    }
+
+    last_err: Optional[Exception] = None
+    for sym in _stooq_symbol_candidates(ticker, market):
+        try:
+            url = f"https://stooq.com/q/d/l/?s={sym.lower()}&i=d"
+            r = requests.get(url, headers=headers, timeout=25)
+            r.raise_for_status()
+
+            txt = (r.text or "").strip()
+            if not txt:
+                raise RuntimeError("stooq empty body")
+
+            first_line = txt.splitlines()[0].strip()
+            if first_line.lower().startswith("no data"):
+                raise RuntimeError("stooq No data")
+
+            if not first_line.lower().startswith("date,open,high,low,close"):
+                sample = txt[:200].replace("\n", "\\n")
+                raise RuntimeError(f"stooq non-csv payload first_line='{first_line[:80]}' sample='{sample}'")
+
+            df = pd.read_csv(io.StringIO(txt))
+            if df is None or df.empty or "Close" not in df.columns or "Date" not in df.columns:
+                raise RuntimeError(f"stooq missing columns: {list(df.columns) if df is not None else None}")
+
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce", utc=False)
+            df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+            df = df.dropna(subset=["Date", "Close"]).sort_values("Date")
+
+            idx = pd.DatetimeIndex(df["Date"].to_numpy())
+            close = pd.Series(df["Close"].to_numpy(dtype=float), index=idx).dropna()
+
+            if close.empty:
+                raise RuntimeError("stooq empty close after parse")
+
+            return close
+
+        except Exception as e:
+            last_err = e
+
+    raise RuntimeError(f"stooq failed for {ticker} (cands={_stooq_symbol_candidates(ticker, market)}): {last_err}")
+
+
+def _download_yf_close(ticker: str, start: str, end: Optional[str], max_tries: int, sleep_try: float) -> pd.Series:
+    """
+    yfinance fallback (best-effort).
+    """
+    last_err: Optional[Exception] = None
+    t = (ticker or "").strip()
+
     for k in range(max_tries):
         try:
-            return yf.download(
-                ticker,
+            df = yf.download(
+                t,
                 start=start,
                 end=end,
                 interval="1d",
@@ -294,16 +385,94 @@ def download_daily(
                 progress=False,
                 threads=False,
             )
+            close = _as_close_series(df, t)
+            close = pd.Series(close).dropna()
+            if not close.empty:
+                return close
+            last_err = RuntimeError("empty close series (start/end)")
         except Exception as e:
             last_err = e
-            time.sleep(sleep_try * (1.4 ** k))
-    raise RuntimeError(f"download failed for {ticker}: {last_err}")
+        time.sleep(sleep_try * (1.4**k))
+
+    for k in range(max_tries):
+        try:
+            df = yf.download(
+                t,
+                period="max",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
+            close = _as_close_series(df, t)
+            close = pd.Series(close).dropna()
+            if not close.empty:
+                return close
+            last_err = RuntimeError("empty close series (period=max)")
+        except Exception as e:
+            last_err = e
+        time.sleep(sleep_try * (1.4**k))
+
+    raise RuntimeError(f"yfinance failed for {t}: {last_err}")
 
 
-# -----------------------------
+def download_close_with_fallback(
+    ticker: str,
+    market: str,
+    start: str,
+    end: Optional[str],
+    max_tries: int,
+    sleep_try: float,
+    prefer: str = "stooq",
+) -> Tuple[pd.Series, str]:
+    """
+    Returns (close_series, source).
+    Default: stooq-first (your yfinance tz metadata is broken right now).
+    """
+    prefer = (prefer or "stooq").strip().lower()
+    if prefer not in ("stooq", "yfinance"):
+        prefer = "stooq"
+
+    errs: List[str] = []
+
+    def _try_stooq() -> Optional[pd.Series]:
+        try:
+            s = _download_stooq_close(ticker, market=market)
+            return s if s is not None and not s.empty else None
+        except Exception as e:
+            errs.append(f"stooq failed ({type(e).__name__}: {e})")
+            return None
+
+    def _try_yf() -> Optional[pd.Series]:
+        try:
+            s = _download_yf_close(ticker, start, end, max_tries=max_tries, sleep_try=sleep_try)
+            return s if s is not None and not s.empty else None
+        except Exception as e:
+            errs.append(f"yf failed ({type(e).__name__}: {e})")
+            return None
+
+    if prefer == "stooq":
+        s = _try_stooq()
+        if s is not None:
+            return s, "stooq"
+        s = _try_yf()
+        if s is not None:
+            return s, "yfinance"
+    else:
+        s = _try_yf()
+        if s is not None:
+            return s, "yfinance"
+        s = _try_stooq()
+        if s is not None:
+            return s, "stooq"
+
+    raise RuntimeError(" + ".join(errs) if errs else "no provider returned data")
+
+
+# ============================================================
 # Main
-# -----------------------------
-def main():
+# ============================================================
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--universe", default="data/universe.json")
     ap.add_argument("--start", default="2015-01-01")
@@ -313,25 +482,27 @@ def main():
     ap.add_argument("--windows_per_ticker", type=int, default=120)
     ap.add_argument("--out_dir", default="data/training")
 
-    # add z features
     ap.add_argument("--unsup_bundle", default=None, help="Optional unsup_bundle.joblib to add z_if/z_lof/z_gap_if_lof")
 
-    # throttling / retry
-    ap.add_argument("--sleep_ticker", type=float, default=0.0, help="sleep between tickers (seconds)")
-    ap.add_argument("--max_tries", type=int, default=3, help="download retry count")
-    ap.add_argument("--sleep_try", type=float, default=0.8, help="base sleep between retries (seconds)")
+    ap.add_argument("--sleep_ticker", type=float, default=0.0, help="Sleep between tickers (seconds)")
+    ap.add_argument("--max_tries", type=int, default=3, help="Retry count for yfinance calls")
+    ap.add_argument("--sleep_try", type=float, default=0.8, help="Base sleep between retries (seconds)")
+
+    ap.add_argument("--prefer_provider", default="stooq", choices=["stooq", "yfinance"])
 
     args = ap.parse_args()
 
-    rules = LabelRules(horizon_days=args.horizon_days)
+    rules = LabelRules(horizon_days=int(args.horizon_days))
 
     uni_path = Path(args.universe)
     if not uni_path.exists():
         raise FileNotFoundError(f"Universe file not found: {uni_path}")
 
     uni = json.loads(uni_path.read_text(encoding="utf-8"))
+    if not isinstance(uni, list):
+        raise ValueError("Universe must be a JSON list of {ticker, asset_type, market} objects.")
 
-    unsup = None
+    unsup: Optional[Dict[str, Any]] = None
     if args.unsup_bundle:
         unsup = load_unsup_bundle(args.unsup_bundle)
         print(f"✅ loaded unsup bundle: {args.unsup_bundle} (cols={len(unsup['columns'])})")
@@ -345,58 +516,61 @@ def main():
 
     counts = {"ok": 0, "warn": 0, "block": 0}
     fails = 0
+    skipped = 0
 
     for item in uni:
-        ticker = item["ticker"]
-        asset_type = item["asset_type"]
-        market = item["market"]
+        ticker = str(item.get("ticker", "")).strip()
+        asset_type = str(item.get("asset_type", "")).strip()
+        market = str(item.get("market", "")).strip()
+
+        skip_reason = should_skip_ticker_for_training(ticker)
+        if skip_reason:
+            skipped += 1
+            print(f"↪︎ skip {ticker} ({skip_reason})")
+            continue
 
         try:
-            df = download_daily(
-                ticker,
-                start=args.start,
-                end=args.end,
-                max_tries=args.max_tries,
-                sleep_try=args.sleep_try,
+            close, src = download_close_with_fallback(
+                ticker=ticker,
+                market=market,
+                start=str(args.start),
+                end=str(args.end) if args.end else None,
+                max_tries=int(args.max_tries),
+                sleep_try=float(args.sleep_try),
+                prefer=str(args.prefer_provider),
             )
 
-            if df is None or df.empty:
-                print(f"⚠️ no data for {ticker}")
-                fails += 1
-                continue
-
-            close = _as_close_series(df, ticker)
+            close = pd.Series(close).dropna()
             if close.empty:
-                print(f"⚠️ no close series for {ticker}")
-                fails += 1
-                continue
+                raise RuntimeError("empty close series after download")
 
             ret = close.pct_change()
 
-            min_len = args.lookback_days + args.horizon_days + 30
+            min_len = int(args.lookback_days) + int(args.horizon_days) + 30
             if len(close) < min_len:
-                print(f"⚠️ too short {ticker} len={len(close)} (need {min_len})")
+                print(f"⚠️ {ticker} too short len={len(close)} (need {min_len}) [{src}]")
                 fails += 1
                 continue
 
-            min_end = args.lookback_days
-            max_end = len(close) - args.horizon_days - 1
+            min_end = int(args.lookback_days)
+            max_end = len(close) - int(args.horizon_days) - 1
             available = max_end - min_end
             if available <= 10:
-                print(f"⚠️ not enough window room for {ticker} (len={len(close)})")
+                print(f"⚠️ {ticker} not enough window room (len={len(close)}) [{src}]")
                 fails += 1
                 continue
 
             end_ixs = np.linspace(
                 min_end,
                 max_end,
-                num=min(args.windows_per_ticker, available),
+                num=min(int(args.windows_per_ticker), available),
                 dtype=int,
             )
 
+            wrote = 0
             for end_ix in end_ixs:
-                past_slice = slice(end_ix - args.lookback_days, end_ix)
-                fut_slice = slice(end_ix, end_ix + args.horizon_days)
+                past_slice = slice(end_ix - int(args.lookback_days), end_ix)
+                fut_slice = slice(end_ix, end_ix + int(args.horizon_days))
 
                 px_past = close.iloc[past_slice]
                 ret_past = ret.iloc[past_slice]
@@ -423,17 +597,18 @@ def main():
                     out_block.write(line + "\n")
 
                 counts[lab] += 1
+                wrote += 1
 
-            print(f"✅ {ticker} done")
+            print(f"✅ {ticker} done (windows={wrote}) [{src}]")
 
-            if args.sleep_ticker > 0:
-                time.sleep(args.sleep_ticker)
+            if float(args.sleep_ticker) > 0:
+                time.sleep(float(args.sleep_ticker))
 
         except Exception as e:
-            print(f"⚠️ {ticker} failed: {e}")
             fails += 1
-            if args.sleep_ticker > 0:
-                time.sleep(args.sleep_ticker)
+            print(f"⚠️ {ticker} failed: {e}")
+            if float(args.sleep_ticker) > 0:
+                time.sleep(float(args.sleep_ticker))
 
     out_ok.close()
     out_warn.close()
@@ -442,8 +617,16 @@ def main():
     print("\n--- DONE ---")
     print("counts:", counts)
     print("fails:", fails)
+    print("skipped:", skipped)
     print(f"written to: {out_dir}")
 
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
