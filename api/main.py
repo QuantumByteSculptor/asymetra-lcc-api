@@ -84,7 +84,7 @@ DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True
 # =============================
 # FastAPI
 # =============================
-app = FastAPI(title="Asymetra LCC API", version="1.8.4")
+app = FastAPI(title="Asymetra LCC API", version="1.8.6")
 
 
 
@@ -163,8 +163,15 @@ def _load_unsup() -> Dict[str, Any]:
     if _UNSUP is None:
         p = Path(UNSUP_BUNDLE_PATH)
         if not p.exists():
-            raise RuntimeError(f"Missing unsup bundle: {p}")
-        _UNSUP = joblib.load(p)
+            # Never crash the API in prod: unsup scoring becomes disabled.
+            logger.error(f"[UNSUP] Missing unsup bundle: {p} -> unsup disabled")
+            _UNSUP = {}
+            return _UNSUP
+        try:
+            _UNSUP = joblib.load(p)
+        except Exception as e:
+            logger.error(f"[UNSUP] failed to load {p}: {type(e).__name__}: {e} -> unsup disabled")
+            _UNSUP = {}
     return _UNSUP
 
 
@@ -860,6 +867,12 @@ def _unsup_missing_coverage(feats: Dict[str, Any], cfg: Dict[str, Any], cols: li
 
 def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
     b = _load_unsup()
+    if not b:
+        return {
+            'status': 'DISABLED',
+            'reason': 'missing_unsup_bundle',
+        }
+
     cfg = b.get("config", DEFAULT_CONFIG)
     cols = b.get("columns") or vector_columns(cfg)
 
