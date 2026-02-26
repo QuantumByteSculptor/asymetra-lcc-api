@@ -6,7 +6,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system deps needed for:
-# - curl (download models)
+# - curl (download models)  <- laissé si tu veux garder curl pour debug local
 # - tar  (extract models)
 # - ca-certificates (HTTPS)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -22,17 +22,10 @@ COPY api/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ============================
-# Download ML models (GitHub Release)
+# Application models (copie depuis le repo)
 # ============================
-# This downloads models.tar.gz from GitHub Releases
-# and extracts it into /app/models/
-RUN mkdir -p /app/models \
-  && curl -L \
-     -H "Accept: application/octet-stream" \
-     https://api.github.com/repos/QuantumByteSculptor/asymetra-lcc-api/releases/assets/351136422 \
-     -o /tmp/models.tar.gz \
-  && tar -xzf /tmp/models.tar.gz -C /app \
-  && rm -f /tmp/models.tar.gz
+# Copier les modèles ML fournis dans le repo (bin_sigmoid.joblib, thresholds, unsup_bundle, ...)
+COPY models /app/models
 
 # ============================
 # Application code
@@ -52,6 +45,7 @@ ENV SUP_BUNDLE_PATH=/app/models/sup_bundle.joblib
 # Start API
 # ============================
 CMD ["python", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
 
 
 
