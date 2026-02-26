@@ -3,11 +3,20 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import joblib
 import numpy as np
+
+# ------------------------------------------------------------------
+# Ensure repo root is on sys.path so we import local features.py
+# (avoid collision with pip package named "features")
+# ------------------------------------------------------------------
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 # Reuse your feature builder (same as api.main)
 from features import DEFAULT_CONFIG, features_to_row, vector_columns  # type: ignore
@@ -22,13 +31,11 @@ BIN_T_HI_DEFAULT = float(os.getenv("BIN_T_HI_DEFAULT", "0.85"))
 
 DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True")
 
-
 # -----------------------------
 # Caches
 # -----------------------------
 _BIN_BUNDLE: Optional[Dict[str, Any]] = None
 _THRESHOLDS: Optional[Dict[str, Any]] = None
-
 
 # -----------------------------
 # Small utils
@@ -90,6 +97,7 @@ def _load_bin_bundle() -> Dict[str, Any]:
     Loads models/bin_sigmoid.joblib (cached).
     Expected shape (flexible):
       - may include: model, cols (or columns), calibrated, calib_method, alpha, config
+    NEVER crashes: if missing/corrupt, returns {}.
     """
     global _BIN_BUNDLE
     if _BIN_BUNDLE is not None:
@@ -100,7 +108,12 @@ def _load_bin_bundle() -> Dict[str, Any]:
         _BIN_BUNDLE = {}
         return _BIN_BUNDLE
 
-    _BIN_BUNDLE = joblib.load(p)
+    try:
+        _BIN_BUNDLE = joblib.load(p)
+    except Exception:
+        _BIN_BUNDLE = {}
+        return _BIN_BUNDLE
+
     if not isinstance(_BIN_BUNDLE, dict):
         # normalize
         _BIN_BUNDLE = {"model": _BIN_BUNDLE}
@@ -229,31 +242,49 @@ def decide(feats: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     cfg = b.get("config", DEFAULT_CONFIG)
-
     X = _vector_for_cols(feats, cols, cfg=cfg)
 
-    # Predict probability of NON-OK (assume binary proba [OK, NONOK] or [NONOK, OK] unknown)
+    # Predict probability of NON-OK robustly
     p_non_ok: Optional[float] = None
     try:
         proba = model.predict_proba(X)[0]
         proba = np.asarray(proba, dtype=float)
 
-        # Heuristic:
-        # - If 2 classes: take max of last column as non-ok if bundle says so, else assume class1 is non-ok.
-        # If bundle includes "non_ok_index", use it.
+        # Preferred: explicit index from bundle
         non_ok_index = b.get("non_ok_index")
         if isinstance(non_ok_index, int) and 0 <= non_ok_index < len(proba):
             p_non_ok = float(proba[non_ok_index])
         else:
-            if len(proba) == 2:
-                p_non_ok = float(proba[1])
-            else:
-                # if multi-class, treat "non-ok" as 1 - P(OK) if "ok_index" exists, else max non-0
-                ok_index = b.get("ok_index")
-                if isinstance(ok_index, int) and 0 <= ok_index < len(proba):
-                    p_non_ok = float(1.0 - proba[ok_index])
+            # Next best: use model.classes_ if present
+            if hasattr(model, "classes_"):
+                classes = list(getattr(model, "classes_"))
+                # Try common label conventions first
+                if "NON_OK" in classes:
+                    p_non_ok = float(proba[classes.index("NON_OK")])
+                elif "non_ok" in classes:
+                    p_non_ok = float(proba[classes.index("non_ok")])
+                elif 1 in classes:
+                    p_non_ok = float(proba[classes.index(1)])
                 else:
-                    p_non_ok = float(np.max(proba[1:])) if len(proba) > 1 else float(proba[0])
+                    # fallback heuristic
+                    if len(proba) == 2:
+                        p_non_ok = float(proba[1])
+                    else:
+                        ok_index = b.get("ok_index")
+                        if isinstance(ok_index, int) and 0 <= ok_index < len(proba):
+                            p_non_ok = float(1.0 - proba[ok_index])
+                        else:
+                            p_non_ok = float(np.max(proba[1:])) if len(proba) > 1 else float(proba[0])
+            else:
+                # Final fallback heuristic
+                if len(proba) == 2:
+                    p_non_ok = float(proba[1])
+                else:
+                    ok_index = b.get("ok_index")
+                    if isinstance(ok_index, int) and 0 <= ok_index < len(proba):
+                        p_non_ok = float(1.0 - proba[ok_index])
+                    else:
+                        p_non_ok = float(np.max(proba[1:])) if len(proba) > 1 else float(proba[0])
 
     except Exception as e:
         return _compact_decision(
@@ -298,6 +329,7 @@ def decide(feats: Dict[str, Any]) -> Dict[str, Any]:
             "debug": debug_block,
         }
     )
+
 
 
 
