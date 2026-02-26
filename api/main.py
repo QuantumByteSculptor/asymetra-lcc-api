@@ -84,7 +84,7 @@ DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True
 # =============================
 # FastAPI
 # =============================
-app = FastAPI(title="Asymetra LCC API", version="1.8.6")
+app = FastAPI(title="Asymetra LCC API", version="1.8.7")
 
 
 
@@ -159,19 +159,29 @@ _SUP: Optional[Dict[str, Any]] = None
 
 
 def _load_unsup() -> Dict[str, Any]:
+    """
+    Loads unsupervised bundle.
+    NEVER crashes the API.
+    If missing or corrupted, unsup is disabled.
+    """
     global _UNSUP
-    if _UNSUP is None:
-        p = Path(UNSUP_BUNDLE_PATH)
-        if not p.exists():
-            # Never crash the API in prod: unsup scoring becomes disabled.
-            logger.error(f"[UNSUP] Missing unsup bundle: {p} -> unsup disabled")
-            _UNSUP = {}
-            return _UNSUP
-        try:
-            _UNSUP = joblib.load(p)
-        except Exception as e:
-            logger.error(f"[UNSUP] failed to load {p}: {type(e).__name__}: {e} -> unsup disabled")
-            _UNSUP = {}
+
+    if _UNSUP is not None:
+        return _UNSUP
+
+    p = Path(UNSUP_BUNDLE_PATH)
+
+    if not p.exists():
+        logger.error(f"[UNSUP] Missing unsup bundle: {p} -> unsup disabled")
+        _UNSUP = {}
+        return _UNSUP
+
+    try:
+        _UNSUP = joblib.load(p)
+    except Exception as e:
+        logger.exception(f"[UNSUP] Failed to load bundle: {type(e).__name__}: {e} -> unsup disabled")
+        _UNSUP = {}
+
     return _UNSUP
 
 
@@ -869,9 +879,21 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
     b = _load_unsup()
     if not b:
         return {
-            'status': 'DISABLED',
-            'reason': 'missing_unsup_bundle',
+            "raw_if": None,
+            "raw_lof": None,
+            "z_if": None,
+            "z_lof": None,
+            "ensemble": None,
+            "status": "DISABLED",
+            "thresholds": {"warn": None, "block": None},
+            "asset_thresholds_used": False,
+            "missing_count": 0,
+            "missing_ratio": 0.0,
+            "missing_cols_sample": [],
+            "n_cols": 0,
+            "debug": {"reason": "missing_unsup_bundle"},
         }
+
 
     cfg = b.get("config", DEFAULT_CONFIG)
     cols = b.get("columns") or vector_columns(cfg)
