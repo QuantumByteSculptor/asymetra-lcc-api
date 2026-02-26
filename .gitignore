@@ -70,3 +70,7 @@ test_api.sh
 
 
 models.tar.gz
+# Allow committing calibrated binary artifacts
+!models/bin_sigmoid.joblib
+!models/threshold_sigmoid.json
+
