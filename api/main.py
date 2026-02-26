@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import logging
+import traceback
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
+from fastapi import Request
 import sys
 from pathlib import Path
 
@@ -82,6 +86,17 @@ DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True
 # =============================
 app = FastAPI(title="Asymetra LCC API", version="1.8.2")
 
+
+
+
+# =============================
+# Global exception handler (log full traceback on Render)
+# =============================
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    tb = traceback.format_exc()
+    logger.error("UNHANDLED ERROR: %s\n%s", repr(exc), tb)
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
 # =============================
 # Pydantic Models
@@ -1521,28 +1536,4 @@ def score_oracle(
     if oracle_meta is not None:
         out["oracle_meta"] = oracle_meta
 
-    return out
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    return jsonable_encoder(out)
