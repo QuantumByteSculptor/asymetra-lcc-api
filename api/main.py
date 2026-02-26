@@ -84,10 +84,20 @@ DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True
 # =============================
 # FastAPI
 # =============================
-app = FastAPI(title="Asymetra LCC API", version="1.8.3")
+app = FastAPI(title="Asymetra LCC API", version="1.8.4")
 
 
 
+
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    # Log full traceback to Render logs
+    import uuid
+    error_id = str(uuid.uuid4())[:8]
+    logger.exception(f"[UNHANDLED:{error_id}] {request.method} {request.url} -> {type(exc).__name__}: {exc}")
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error", "error_id": error_id})
 
 # =============================
 # Global exception handler (log full traceback on Render)
