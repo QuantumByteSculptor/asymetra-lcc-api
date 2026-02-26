@@ -78,7 +78,7 @@ DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True
 # =============================
 # FastAPI
 # =============================
-app = FastAPI(title="Asymetra LCC API", version="1.7.2")
+app = FastAPI(title="Asymetra LCC API", version="1.8.1")
 
 
 # =============================
