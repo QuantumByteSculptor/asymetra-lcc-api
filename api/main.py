@@ -32,6 +32,8 @@ import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from api.decision import decide as bin_decide
+
 # Reuse your existing feature builder (from your ML LCC project)
 from features import DEFAULT_CONFIG, features_to_row, vector_columns
 
@@ -1027,16 +1029,50 @@ def _integrity_flags(feats: Dict[str, Any]) -> Tuple[List[str], List[str]]:
 
 def _bin_calibrated_decision(feats: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    Wrap api.decision.decide() safely.
-    Never crash the API: returns None if disabled, else a dict (or error dict).
+    Safe wrapper around api.decision.decide().
+    - Never raises
+    - Always returns JSON-serializable content
     """
     if not BIN_ENABLED:
         return None
+
     try:
-        from api.decision import decide  # type: ignore
-        return decide(feats)
+        from api.decision import decide  # import local, avoids circular issues
+        out = decide(feats)
+
+        # sécurité JSON (numpy → float/int)
+        if isinstance(out, dict):
+            cleaned = {}
+            for k, v in out.items():
+                try:
+                    if hasattr(v, "item"):  # numpy scalar
+                        cleaned[k] = v.item()
+                    else:
+                        cleaned[k] = v
+                except Exception:
+                    cleaned[k] = None
+            return cleaned
+
+        return out
+
     except Exception as e:
-        return {"error": f"{type(e).__name__}: {e}"}
+        # ⚠️ jamais faire tomber l'API
+        return {
+            "p_non_ok": None,
+            "decision": "OK",
+            "thresholds": {
+                "t_lo": 0.5,
+                "t_hi": BIN_T_HI_DEFAULT,
+                "alpha": None,
+            },
+            "thresholds_source": {
+                "path": BIN_THRESHOLDS_PATH,
+                "fallback_used": True,
+            },
+            "debug": {
+                "error": f"{type(e).__name__}: {e}"
+            },
+        }
 
 
 # =============================
