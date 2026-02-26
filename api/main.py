@@ -1053,7 +1053,50 @@ def root() -> Dict[str, Any]:
 
 
 @app.get("/health")
+
+def _health_bin_diag():
+    # diagnostic binaire calibré via loaders robustes (api.decision)
+    try:
+        from api import decision as _d
+        bundle_path = os.getenv("BIN_BUNDLE_PATH", "models/bin_sigmoid.joblib")
+        thr_path = os.getenv("BIN_THRESHOLDS_PATH", "models/threshold_sigmoid.json")
+        binfo = _d._load_bin_bundle_safe(bundle_path)
+        tinfo = _d._load_thresholds_safe(thr_path)
+        return {
+            "enabled": os.getenv("BIN_ENABLED", "1").strip() not in ("0","false","False"),
+            "bundle_path": bundle_path,
+            "thresholds_path": thr_path,
+            "t_hi_default": float(os.getenv("BIN_T_HI_DEFAULT", "0.85")),
+            "bundle_loaded": bool(binfo.get("bundle_loaded", False)),
+            "thresholds_loaded": bool(tinfo.get("loaded", False)),
+            "thresholds": {"t_lo": tinfo.get("t_lo"), "t_hi": tinfo.get("t_hi"), "alpha": tinfo.get("alpha")},
+            "bundle_calibrated": bool(binfo.get("bundle_calibrated", False)),
+            "calib_method": binfo.get("calib_method"),
+            "n_cols": int(binfo.get("n_cols", 0)),
+            "cols_preview": binfo.get("cols_preview", []),
+            "thresholds_fallback_used": bool(tinfo.get("fallback_used", True)),
+            "thresholds_source_path": tinfo.get("path"),
+        }
+    except Exception as e:
+        return {
+            "enabled": os.getenv("BIN_ENABLED", "1").strip() not in ("0","false","False"),
+            "bundle_path": os.getenv("BIN_BUNDLE_PATH", "models/bin_sigmoid.joblib"),
+            "thresholds_path": os.getenv("BIN_THRESHOLDS_PATH", "models/threshold_sigmoid.json"),
+            "t_hi_default": float(os.getenv("BIN_T_HI_DEFAULT", "0.85")),
+            "bundle_loaded": False,
+            "thresholds_loaded": False,
+            "thresholds": {"t_lo": None, "t_hi": None, "alpha": None},
+            "bundle_calibrated": False,
+            "calib_method": None,
+            "n_cols": 0,
+            "cols_preview": [],
+            "thresholds_fallback_used": True,
+            "thresholds_source_path": os.getenv("BIN_THRESHOLDS_PATH", "models/threshold_sigmoid.json"),
+            "error": str(e),
+        }
+
 def health() -> Dict[str, Any]:
+    bin_calibrated = _health_bin_diag()
     # ----- BIN CALIBRATED STATUS -----
     bin_status: Dict[str, Any] = {
         "enabled": BIN_ENABLED,
@@ -1110,16 +1153,7 @@ def health() -> Dict[str, Any]:
         "oracle_cache_columns": _ORACLE_CACHE.columns(),
         "oracle_cache_recent": _ORACLE_CACHE.recent(limit=5),
         "unsup_coverage": {"max_missing_ratio": UNSUP_MAX_MISSING_RATIO, "max_missing_count": UNSUP_MAX_MISSING_COUNT},
-        "bin_calibrated": bin_status,
-    }
-
-
-@app.post("/oracle/analyze")
-def oracle_endpoint(req: OracleRequest, x_api_key: Optional[str] = Header(default=None, alias="x-api-key")) -> Dict[str, Any]:
-    _require_api_key(x_api_key)
-    try:
-        feats, meta = _oracle_analyze(req)
-        return {"features": feats, "meta": meta}
+        "bin_calibrated": bin_calibrated,
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"compute failed: {e}")
 
