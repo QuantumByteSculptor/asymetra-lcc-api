@@ -2,12 +2,33 @@
 from __future__ import annotations
 
 import logging
-import traceback
+import os
+import sys
+import time
+import json
+import sqlite3
+import io
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple, List
+
+import joblib
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import requests
+
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from fastapi import Request
-import sys
-from pathlib import Path
+from pydantic import BaseModel, Field
+
+from api.decision import decide as bin_decide  # (ok même si pas utilisé directement)
+
+# Reuse your existing feature builder (from your ML LCC project)
+from features import DEFAULT_CONFIG, features_to_row, vector_columns
+
 
 # ------------------------------------------------------------------
 # Ensure repo root is on sys.path so we import local features.py
@@ -19,27 +40,6 @@ if str(REPO_ROOT) not in sys.path:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-import os
-import time
-import json
-import sqlite3
-import io
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, List
-
-import joblib
-import numpy as np
-import pandas as pd
-import yfinance as yf
-import requests
-from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field
-
-from api.decision import decide as bin_decide
-
-# Reuse your existing feature builder (from your ML LCC project)
-from features import DEFAULT_CONFIG, features_to_row, vector_columns
 
 
 # =============================
@@ -87,26 +87,24 @@ DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True
 app = FastAPI(title="Asymetra LCC API", version="1.8.8")
 
 
-
-
-
-
+# ✅ Un seul handler global (pas de doublons)
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request: Request, exc: Exception):
-    # Log full traceback to Render logs
-    import uuid
     error_id = str(uuid.uuid4())[:8]
-    logger.exception(f"[UNHANDLED:{error_id}] {request.method} {request.url} -> {type(exc).__name__}: {exc}")
+    logger.exception(
+        f"[UNHANDLED:{error_id}] {request.method} {request.url} -> {type(exc).__name__}: {exc}"
+    )
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error", "error_id": error_id})
 
-# =============================
-# Global exception handler (log full traceback on Render)
-# =============================
-@app.exception_handler(Exception)
-async def _unhandled_exception_handler(request: Request, exc: Exception):
-    tb = traceback.format_exc()
-    logger.error("UNHANDLED ERROR: %s\n%s", repr(exc), tb)
-    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
+def _err500(request: Request, where: str, exc: Exception) -> JSONResponse:
+    """
+    500 stable + log complet (traceback incluse).
+    """
+    error_id = str(uuid.uuid4())[:8]
+    logger.exception(f"[ERR500:{error_id}] {where} {request.method} {request.url} -> {type(exc).__name__}: {exc}")
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error", "error_id": error_id})
+
 
 # =============================
 # Pydantic Models
@@ -240,13 +238,6 @@ def _features_dict(req: ScoreRequest) -> Dict[str, Any]:
 
 def _utc_now() -> int:
     return int(time.time())
-
-def _err500(where: str, exc: Exception):
-    import uuid
-    error_id = str(uuid.uuid4())[:8]
-    logger.exception(f"[ERR500:{error_id}] {where} -> {type(exc).__name__}: {exc}")
-    # keep response stable + machine-readable
-    raise HTTPException(status_code=500, detail={"message": "Internal Server Error", "error_id": error_id})
 
 
 # =============================
@@ -511,7 +502,6 @@ def _download_daily_yf(ticker: str, lookback_days: int, max_tries: int, sleep_tr
 
     raise RuntimeError(f"yfinance download failed or insufficient data for {t}: {last_err}")
 
-
 # =============================
 # Oracle computations (stats)
 # =============================
@@ -738,10 +728,6 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
     ttl = _market_ttl_seconds(market)
 
     def _try_provider(provider: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """
-        provider: 'yfinance' or 'stooq'
-        Applies cache per provider.
-        """
         key = OracleCache.make_key(
             asset_type=asset_type,
             market=market,
@@ -901,9 +887,9 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
             "debug": {"reason": "missing_unsup_bundle"},
         }
 
-
     cfg = b.get("config", DEFAULT_CONFIG)
     cols = b.get("columns") or vector_columns(cfg)
+    cols = list(cols)
 
     missing_count, missing_ratio, missing_sample = _unsup_missing_coverage(feats, cfg, cols)
 
@@ -1107,7 +1093,6 @@ def _bin_calibrated_decision(feats: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         from api.decision import decide  # import local, avoids circular issues
         out = decide(feats)
 
-        # sécurité JSON (numpy → float/int)
         if isinstance(out, dict):
             cleaned = {}
             for k, v in out.items():
@@ -1123,22 +1108,12 @@ def _bin_calibrated_decision(feats: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return out
 
     except Exception as e:
-        # ⚠️ jamais faire tomber l'API
         return {
             "p_non_ok": None,
             "decision": "OK",
-            "thresholds": {
-                "t_lo": 0.5,
-                "t_hi": BIN_T_HI_DEFAULT,
-                "alpha": None,
-            },
-            "thresholds_source": {
-                "path": BIN_THRESHOLDS_PATH,
-                "fallback_used": True,
-            },
-            "debug": {
-                "error": f"{type(e).__name__}: {e}"
-            },
+            "thresholds": {"t_lo": 0.5, "t_hi": BIN_T_HI_DEFAULT, "alpha": None},
+            "thresholds_source": {"path": BIN_THRESHOLDS_PATH, "fallback_used": True},
+            "debug": {"error": f"{type(e).__name__}: {e}"},
         }
 
 
@@ -1157,7 +1132,6 @@ def root() -> Dict[str, Any]:
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    # ----- BIN CALIBRATED STATUS -----
     bin_status: Dict[str, Any] = {
         "enabled": BIN_ENABLED,
         "bundle_path": BIN_BUNDLE_PATH,
@@ -1170,7 +1144,6 @@ def health() -> Dict[str, Any]:
 
     if BIN_ENABLED:
         try:
-            # internal loaders in api.decision (you added them)
             from api.decision import _load_bin_bundle, _load_thresholds  # type: ignore
 
             b = _load_bin_bundle()
@@ -1179,20 +1152,13 @@ def health() -> Dict[str, Any]:
             bin_status["calib_method"] = b.get("calib_method")
             bin_status["n_cols"] = len(b.get("cols") or [])
 
-        except Exception as e:
-            bin_status["bundle_error"] = f"{type(e).__name__}: {e}"
-
-        try:
             thr = _load_thresholds()
             bin_status["thresholds_loaded"] = True
 
-            # expected shape from your decision.py:
-            #   thr = {"t_lo":..., "t_hi":..., "raw": <json or None>, "path":..., "fallback_used": bool}
             t_lo = float(thr.get("t_lo", 0.5))
             t_hi = float(thr.get("t_hi", BIN_T_HI_DEFAULT))
 
             out_thr: Dict[str, Any] = {"t_lo": t_lo, "t_hi": t_hi}
-
             raw = thr.get("raw")
             if isinstance(raw, dict) and "alpha" in raw:
                 out_thr["alpha"] = raw["alpha"]
@@ -1202,7 +1168,7 @@ def health() -> Dict[str, Any]:
             bin_status["thresholds_source_path"] = thr.get("path", BIN_THRESHOLDS_PATH)
 
         except Exception as e:
-            bin_status["threshold_error"] = f"{type(e).__name__}: {e}"
+            bin_status["error"] = f"{type(e).__name__}: {e}"
 
     return {
         "ok": True,
@@ -1227,85 +1193,81 @@ def oracle_endpoint(req: OracleRequest, x_api_key: Optional[str] = Header(defaul
         raise HTTPException(status_code=422, detail=f"compute failed: {e}")
 
 
+# ✅ /score corrigé: pas de float(None), try/except + error_id
 @app.post("/score")
-def score(req: ScoreRequest, x_api_key: Optional[str] = Header(default=None, alias="x-api-key")) -> Dict[str, Any]:
+def score(
+    req: ScoreRequest,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
+) -> Any:
     _require_api_key(x_api_key)
-
-    feats = _features_dict(req)
-    u = _unsup_score(feats)
-
-    resp: Dict[str, Any] = {
-        "ensemble": float(u["ensemble"]),
-        "status": u["status"],
-        "thresholds": u["thresholds"],
-        "debug_unsup": {
-            "raw_if": u.get("raw_if"),
-            "raw_lof": u.get("raw_lof"),
-            "z_if": u.get("z_if"),
-            "z_lof": u.get("z_lof"),
-            "missing_count": u.get("missing_count"),
-            "missing_ratio": u.get("missing_ratio"),
-            "missing_cols_sample": u.get("missing_cols_sample"),
-            "n_cols": u.get("n_cols"),
-        },
-    }
-
-    # shadow object always populated (may be empty if nothing available)
-    shadow_obj: Dict[str, Any] = {}
-
-    # 1) bin calibrated decision: always attempt (non-blocking)
     try:
-        from api.decision import decide  # type: ignore
+        feats = _features_dict(req)
+        u = _unsup_score(feats)
+
+        ensemble = u.get("ensemble", None)
+        ensemble_out = float(ensemble) if isinstance(ensemble, (int, float)) and np.isfinite(ensemble) else None
+
+        resp: Dict[str, Any] = {
+            "ensemble": ensemble_out,
+            "status": u.get("status", "DISABLED"),
+            "thresholds": u.get("thresholds"),
+            "debug_unsup": {
+                "raw_if": u.get("raw_if"),
+                "raw_lof": u.get("raw_lof"),
+                "z_if": u.get("z_if"),
+                "z_lof": u.get("z_lof"),
+                "missing_count": u.get("missing_count"),
+                "missing_ratio": u.get("missing_ratio"),
+                "missing_cols_sample": u.get("missing_cols_sample"),
+                "n_cols": u.get("n_cols"),
+                "debug": u.get("debug"),
+            },
+        }
+
+        shadow_obj: Dict[str, Any] = {}
+
         try:
-            bin_dec = decide(feats)
-            shadow_obj["bin_calibrated"] = bin_dec
+            shadow_obj["bin_calibrated"] = _bin_calibrated_decision(feats)
         except Exception as e:
             shadow_obj["bin_calibrated_error"] = f"{type(e).__name__}: {e}"
+
+        try:
+            xgb = _xgb_shadow_score(feats)
+            if xgb is not None:
+                shadow_obj["xgb"] = xgb
+        except Exception as e:
+            shadow_obj["xgb_error"] = f"{type(e).__name__}: {e}"
+
+        if shadow_obj:
+            resp["shadow"] = shadow_obj
+
+        return jsonable_encoder(resp)
+
     except Exception as e:
-        # if import fails, record but keep going
-        shadow_obj["bin_import_error"] = f"{type(e).__name__}: {e}"
-
-    # 2) xgb shadow (optional) -- keep only if available
-    try:
-        xgb = _xgb_shadow_score(feats)
-        if xgb is not None:
-            shadow_obj["xgb"] = xgb
-    except Exception as e:
-        # never crash API
-        shadow_obj["xgb_error"] = f"{type(e).__name__}: {e}"
-
-    if shadow_obj:
-        resp["shadow"] = shadow_obj
-
-    return resp
+        return _err500(request, "score", e)
 
 
-# ✅ PATCHES À AJOUTER DANS api/main.py
-# - oracle_succeeded (diff oracle tenté vs réussi)
-# - oracle_error_code (NO_DATA / RATE_LIMIT / NETWORK / PARSE / UNKNOWN)
-# - unsup_skip_reason (pour expliquer pourquoi on SKIP)
-
-from typing import Optional, Dict, Any, Tuple, List
+# ✅ PATCHES À AJOUTER
+# - oracle_succeeded
+# - oracle_error_code
+# - unsup_skip_reason
 
 
 def _oracle_error_code(err: Exception) -> str:
     msg = (str(err) or "").lower()
 
-    # Cas "pas de données" (stooq renvoie souvent "No data")
     if "no data" in msg or "notreal" in msg:
         return "NO_DATA"
     if "insufficient closes" in msg or "not enough closes" in msg:
         return "NO_DATA"
 
-    # Rate limit / throttling
     if "rate limit" in msg or "too many requests" in msg or "429" in msg:
         return "RATE_LIMIT"
 
-    # Réseau / timeout
     if "timeout" in msg or "timed out" in msg or "connection" in msg or "dns" in msg:
         return "NETWORK"
 
-    # Parsing / réponse inattendue
     if "non-csv response" in msg or "jsondecodeerror" in msg or "parse" in msg:
         return "PARSE"
 
@@ -1318,7 +1280,6 @@ def _unsup_skip_reason(
     max_missing_ratio: float,
     max_missing_count: int,
 ) -> Optional[str]:
-    # max_missing_count == 0 => gate count désactivée
     if missing_ratio > max_missing_ratio:
         return f"MISSING_RATIO>{max_missing_ratio:.3f}"
     if max_missing_count > 0 and missing_count > max_missing_count:
@@ -1359,7 +1320,6 @@ def score_oracle(
         f"effective_lookback={effective_lookback}"
     )
 
-    # --- Integrity + UNSUP (pré-oracle) ---
     integrity_flags, integrity_critical = _integrity_flags(lovable_feats)
     unsup_pre = _unsup_score(lovable_feats)
 
@@ -1376,27 +1336,23 @@ def score_oracle(
     unsup_skip_pre = unsup_skip_reason_pre is not None
     unsup_status_pre = "SKIP" if unsup_skip_pre else str(unsup_pre.get("status"))
 
-    # --- Missing critical (pré-oracle) ---
     critical = ["var95", "var99", "es95", "vol_ann", "max_drawdown"]
     missing_critical_before = [k for k in critical if _safe_float(lovable_feats.get(k)) is None]
 
-    # --- XGB shadow + BIN calibrated (pré-oracle) ---
     xgb = _xgb_shadow_score(lovable_feats)
     bin_before_oracle = _bin_calibrated_decision(lovable_feats)
 
-    # XGB relax sur WARN shallow
     xgb_ok_relaxes = False
     if xgb and isinstance(xgb.get("probs"), dict):
         pb = xgb["probs"].get("BLOCK")
         if xgb.get("pred") == "OK" and isinstance(pb, (int, float)) and float(pb) <= XGB_OK_PBLOCK_MAX:
             xgb_ok_relaxes = True
 
-    # WARN shallow test
-    warn_thr = float(unsup_pre["thresholds"]["warn"])
-    ensemble = float(unsup_pre["ensemble"])
-    warn_is_shallow = (unsup_status_pre == "WARN") and (ensemble < (warn_thr + WARN_MARGIN))
+    warn_thr = float((unsup_pre.get("thresholds") or {}).get("warn", 0.0) or 0.0)
+    ensemble_pre = _safe_float(unsup_pre.get("ensemble"))
+    ensemble_pre_f = float(ensemble_pre) if ensemble_pre is not None else float("nan")
+    warn_is_shallow = (unsup_status_pre == "WARN") and (np.isfinite(ensemble_pre_f) and (ensemble_pre_f < (warn_thr + WARN_MARGIN)))
 
-    # --- Should Oracle? ---
     should_oracle = False
     reasons: Dict[str, Any] = {
         "force_oracle": bool(req.force_oracle),
@@ -1423,16 +1379,15 @@ def score_oracle(
         if (not warn_is_shallow) and (not xgb_ok_relaxes):
             should_oracle = True
 
-    # --- Oracle execution ---
     oracle_used = False
-    oracle_succeeded = False  # ✅ new
+    oracle_succeeded = False
     oracle_failed = False
     oracle_error = None
-    oracle_error_code = None  # ✅ new
+    oracle_error_code = None
 
     oracle_feats: Optional[Dict[str, Any]] = None
     oracle_meta: Optional[Dict[str, Any]] = None
-    oracle_mode = "none"  # none | rescue | recompute
+    oracle_mode = "none"
 
     if should_oracle:
         oracle_used = True
@@ -1457,18 +1412,13 @@ def score_oracle(
             oracle_error = str(e)
             oracle_error_code = _oracle_error_code(e)
 
-    # --- Features final ---
     features_final = oracle_feats if oracle_feats is not None else lovable_feats
     missing_critical_final = [k for k in critical if _safe_float(features_final.get(k)) is None]
 
-    # --- UNSUP final (post-oracle si oracle réussi, sinon on garde le pré) ---
     unsup_final = None
     if oracle_succeeded and oracle_feats is not None:
         unsup_final = _unsup_score(features_final)
 
-    # Status final:
-    # - si oracle réussi => basé sur unsup_final (avec coverage check final)
-    # - sinon => on garde le statut pré-oracle (SKIP/WARN/BLOCK/OK)
     unsup_status_final: str = unsup_status_pre
     unsup_skip_reason_final: Optional[str] = unsup_skip_reason_pre
 
@@ -1486,25 +1436,23 @@ def score_oracle(
         else:
             unsup_status_final = str(unsup_final.get("status"))
 
-    # ✅ BIN calibrated final (sur features_final)
     bin_final = _bin_calibrated_decision(features_final)
 
     out: Dict[str, Any] = {
         "features_final": features_final,
 
         "oracle_used": oracle_used,
-        "oracle_succeeded": oracle_succeeded,      # ✅ new
+        "oracle_succeeded": oracle_succeeded,
         "oracle_failed": oracle_failed,
         "oracle_error": oracle_error,
-        "oracle_error_code": oracle_error_code,    # ✅ new
+        "oracle_error_code": oracle_error_code,
         "oracle_mode": oracle_mode,
 
-        # ✅ nouveaux champs de statut unsup (pré / final) + statut global
         "unsup_status_pre_oracle": unsup_status_pre,
-        "unsup_skip_reason_pre_oracle": unsup_skip_reason_pre,   # ✅ new
+        "unsup_skip_reason_pre_oracle": unsup_skip_reason_pre,
         "unsup_status_final": unsup_status_final,
-        "unsup_skip_reason_final": unsup_skip_reason_final,      # ✅ new
-        "unsup_status": unsup_status_final,  # ✅ statut global = final
+        "unsup_skip_reason_final": unsup_skip_reason_final,
+        "unsup_status": unsup_status_final,
 
         "missing_critical": missing_critical_final,
         "integrity_flags": integrity_flags,
@@ -1523,7 +1471,7 @@ def score_oracle(
             "n_cols": unsup_pre.get("n_cols"),
         },
 
-        "debug_unsup_after_oracle": unsup_final,  # None si oracle pas réussi
+        "debug_unsup_after_oracle": unsup_final,
 
         "xgb_shadow": xgb,
         "bin_calibrated_before_oracle": bin_before_oracle,
@@ -1563,11 +1511,10 @@ def score_oracle(
             "warn_is_shallow": warn_is_shallow,
             "xgb_ok_relaxes": xgb_ok_relaxes,
             "warn_thr": warn_thr,
-            "ensemble": ensemble,
+            "ensemble": unsup_pre.get("ensemble"),
             "warn_margin": WARN_MARGIN,
             "xgb_ok_pblock_max": XGB_OK_PBLOCK_MAX,
 
-            # pre coverage
             "unsup_missing_ratio_pre": unsup_missing_ratio_pre,
             "unsup_missing_count_pre": unsup_missing_count_pre,
             "unsup_n_cols_pre": unsup_n_cols_pre,
@@ -1589,3 +1536,5 @@ def score_oracle(
         out["oracle_meta"] = oracle_meta
 
     return jsonable_encoder(out)
+
+
