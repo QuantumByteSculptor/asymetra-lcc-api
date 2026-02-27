@@ -4,13 +4,27 @@
 from __future__ import annotations
 
 import logging
-import traceback
+import os
+import time
+import json
+import sqlite3
+import io
 import sys
+import traceback
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Dict, Optional, Tuple, List
 
+import joblib
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import requests
+
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from fastapi import Request
+from pydantic import BaseModel, Field
 
 # ------------------------------------------------------------------
 # Ensure repo root is on sys.path so we import local features.py
@@ -23,24 +37,8 @@ if str(REPO_ROOT) not in sys.path:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-import os
-import time
-import json
-import sqlite3
-import io
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, List
-
-import joblib
-import numpy as np
-import pandas as pd
-import yfinance as yf
-import requests
-from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field
-
 # Reuse your existing feature builder (from your ML LCC project)
-from features import DEFAULT_CONFIG, features_to_row, vector_columns
+from features import DEFAULT_CONFIG, features_to_row, vector_columns  # type: ignore
 
 
 # =============================
@@ -87,10 +85,11 @@ DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True
 # =============================
 app = FastAPI(title="Asymetra LCC API", version="1.8.8")
 
-# ✅ UN SEUL exception handler (avec error_id)
+# ✅ UN SEUL exception handler global (avec error_id)
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request: Request, exc: Exception):
     import uuid
+
     error_id = str(uuid.uuid4())[:8]
     logger.exception(f"[UNHANDLED:{error_id}] {request.method} {request.url} -> {type(exc).__name__}: {exc}")
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error", "error_id": error_id})
@@ -232,6 +231,7 @@ def _utc_now() -> int:
 
 def _err500(where: str, exc: Exception):
     import uuid
+
     error_id = str(uuid.uuid4())[:8]
     logger.exception(f"[ERR500:{error_id}] {where} -> {type(exc).__name__}: {exc}")
     raise HTTPException(status_code=500, detail={"message": "Internal Server Error", "error_id": error_id})
@@ -629,6 +629,7 @@ def _stress_var(returns: np.ndarray, base_var99: Optional[float], window: int = 
         "stress_window_days": int(window),
     }
 
+
 # =========================
 # api/main.py  (PARTIE 2/2)
 # =========================
@@ -728,6 +729,10 @@ def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]
     ttl = _market_ttl_seconds(market)
 
     def _try_provider(provider: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        provider: 'yfinance' or 'stooq'
+        Applies cache per provider.
+        """
         key = OracleCache.make_key(
             asset_type=asset_type,
             market=market,
@@ -859,7 +864,9 @@ def _unsup_missing_coverage(feats: Dict[str, Any], cfg: Dict[str, Any], cols: li
     total = max(1, len(cols))
     missing_count = len(missing_cols)
     missing_ratio = float(missing_count / total)
-    return missing_count, missing_ratio, missing_cols[:25]
+
+    sample = missing_cols[:25]
+    return missing_count, missing_ratio, sample
 
 
 def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
@@ -941,6 +948,7 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
 
     z_if = (raw_if - mu_if) / (sg_if + 1e-12)
     z_lof = (raw_lof - mu_lof) / (sg_lof + 1e-12)
+
     anomaly_score = float((w_if * z_if) + (w_lof * z_lof))
 
     asset_type = (feats.get("asset_type") or "").strip().lower()
@@ -953,6 +961,15 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
         status = "BLOCK"
     elif anomaly_score >= warn_thr:
         status = "WARN"
+
+    meta = b.get("meta", {}) or {}
+    logger.info(
+        f"[UNSUP] raw_if={raw_if:.6f} raw_lof={raw_lof:.6f} "
+        f"z_if={float(z_if):.4f} z_lof={float(z_lof):.4f} "
+        f"w_if={w_if:.3f} w_lof={w_lof:.3f} ensemble={anomaly_score:.4f} status={status} "
+        f"thr_warn={warn_thr:.4f} thr_block={block_thr:.4f} "
+        f"missing_ratio={missing_ratio:.3f} n_cols={len(cols)}"
+    )
 
     return {
         "raw_if": raw_if,
@@ -968,7 +985,9 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
         "missing_cols_sample": missing_sample,
         "n_cols": int(len(cols)),
         "debug": {
-            "bundle_meta": b.get("meta", {}) or {},
+            "bundle_meta": meta,
+            "score_norm": score_norm,
+            "weights": {"if": w_if, "lof": w_lof},
             "thr_source": "per_asset" if asset_type in (thr_per_asset or {}) else "global",
         },
     }
@@ -1069,10 +1088,27 @@ def _bin_calibrated_decision(feats: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        from api.decision import decide  # import local
+        from api.decision import decide  # import local, avoids circular issues
+
         out = decide(feats)
-        return jsonable_encoder(out)
+
+        # sécurité JSON (numpy → float/int)
+        if isinstance(out, dict):
+            cleaned: Dict[str, Any] = {}
+            for k, v in out.items():
+                try:
+                    if hasattr(v, "item"):  # numpy scalar
+                        cleaned[k] = v.item()
+                    else:
+                        cleaned[k] = v
+                except Exception:
+                    cleaned[k] = None
+            return cleaned
+
+        return out  # type: ignore[return-value]
+
     except Exception as e:
+        # ⚠️ jamais faire tomber l'API
         return {
             "p_non_ok": None,
             "decision": "OK",
@@ -1097,6 +1133,7 @@ def root() -> Dict[str, Any]:
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
+    # ----- BIN CALIBRATED STATUS -----
     bin_status: Dict[str, Any] = {
         "enabled": BIN_ENABLED,
         "bundle_path": BIN_BUNDLE_PATH,
@@ -1109,6 +1146,7 @@ def health() -> Dict[str, Any]:
 
     if BIN_ENABLED:
         try:
+            # internal loaders in api.decision
             from api.decision import _load_bin_bundle, _load_thresholds  # type: ignore
 
             b = _load_bin_bundle()
@@ -1135,6 +1173,9 @@ def health() -> Dict[str, Any]:
         except Exception as e:
             bin_status["error"] = f"{type(e).__name__}: {e}"
 
+    unsup_path_abs = str(Path(UNSUP_BUNDLE_PATH).resolve())
+    unsup_exists = Path(UNSUP_BUNDLE_PATH).exists()
+
     return {
         "ok": True,
         "app": "api.main",
@@ -1145,8 +1186,9 @@ def health() -> Dict[str, Any]:
         "oracle_cache_recent": _ORACLE_CACHE.recent(limit=5),
         "unsup_coverage": {"max_missing_ratio": UNSUP_MAX_MISSING_RATIO, "max_missing_count": UNSUP_MAX_MISSING_COUNT},
         "bin_calibrated": bin_status,
-        "unsup_bundle_path": UNSUP_BUNDLE_PATH,
-        "unsup_bundle_exists": Path(UNSUP_BUNDLE_PATH).exists(),
+        # ✅ observabilité bundle
+        "unsup_bundle_path": unsup_path_abs,
+        "unsup_bundle_exists": bool(unsup_exists),
     }
 
 
@@ -1160,23 +1202,21 @@ def oracle_endpoint(req: OracleRequest, x_api_key: Optional[str] = Header(defaul
         raise HTTPException(status_code=422, detail=f"compute failed: {e}")
 
 
-# ✅ /score SAFE (ne crash plus si ensemble=None)
 @app.post("/score")
 def score(req: ScoreRequest, x_api_key: Optional[str] = Header(default=None, alias="x-api-key")) -> Dict[str, Any]:
     _require_api_key(x_api_key)
 
     feats = _features_dict(req)
-    u = _unsup_score(feats)
 
-    ensemble_val = u.get("ensemble", None)
-    thresholds_val = u.get("thresholds", {"warn": None, "block": None})
+    try:
+        u = _unsup_score(feats)
+    except Exception as e:
+        _err500("unsup_score", e)  # raises
 
     resp: Dict[str, Any] = {
-        "ensemble": float(ensemble_val)
-        if isinstance(ensemble_val, (int, float, np.floating)) and np.isfinite(float(ensemble_val))
-        else None,
-        "status": u.get("status", "UNKNOWN"),
-        "thresholds": thresholds_val,
+        "ensemble": float(u["ensemble"]) if u.get("ensemble") is not None else None,
+        "status": u.get("status"),
+        "thresholds": u.get("thresholds"),
         "debug_unsup": {
             "raw_if": u.get("raw_if"),
             "raw_lof": u.get("raw_lof"),
@@ -1191,15 +1231,11 @@ def score(req: ScoreRequest, x_api_key: Optional[str] = Header(default=None, ali
     }
 
     shadow_obj: Dict[str, Any] = {}
-
-    # bin calibrated (non-bloquant)
     try:
-        from api.decision import decide  # type: ignore
-        shadow_obj["bin_calibrated"] = decide(feats)
+        shadow_obj["bin_calibrated"] = _bin_calibrated_decision(feats)
     except Exception as e:
         shadow_obj["bin_calibrated_error"] = f"{type(e).__name__}: {e}"
 
-    # xgb shadow (optionnel)
     try:
         xgb = _xgb_shadow_score(feats)
         if xgb is not None:
@@ -1213,9 +1249,9 @@ def score(req: ScoreRequest, x_api_key: Optional[str] = Header(default=None, ali
     return jsonable_encoder(resp)
 
 
-# =============================
-# PATCH helpers for score_oracle
-# =============================
+# -----------------------------
+# PATCH helpers (score_oracle)
+# -----------------------------
 def _oracle_error_code(err: Exception) -> str:
     msg = (str(err) or "").lower()
 
@@ -1306,8 +1342,8 @@ def score_oracle(
         if xgb.get("pred") == "OK" and isinstance(pb, (int, float)) and float(pb) <= XGB_OK_PBLOCK_MAX:
             xgb_ok_relaxes = True
 
-    warn_thr = float((unsup_pre.get("thresholds") or {}).get("warn", 0.0) or 0.0)
-    ensemble = float(unsup_pre.get("ensemble") or 0.0) if unsup_pre.get("ensemble") is not None else 0.0
+    warn_thr = float((unsup_pre.get("thresholds") or {}).get("warn") or 0.0)
+    ensemble = float(unsup_pre.get("ensemble") or 0.0)
     warn_is_shallow = (unsup_status_pre == "WARN") and (ensemble < (warn_thr + WARN_MARGIN))
 
     # --- Should Oracle? ---
@@ -1375,7 +1411,7 @@ def score_oracle(
     features_final = oracle_feats if oracle_feats is not None else lovable_feats
     missing_critical_final = [k for k in critical if _safe_float(features_final.get(k)) is None]
 
-    # --- UNSUP final ---
+    # --- UNSUP final (post-oracle si oracle réussi, sinon on garde le pré) ---
     unsup_final = None
     if oracle_succeeded and oracle_feats is not None:
         unsup_final = _unsup_score(features_final)
@@ -1397,28 +1433,25 @@ def score_oracle(
         else:
             unsup_status_final = str(unsup_final.get("status"))
 
+    # ✅ BIN calibrated final (sur features_final)
     bin_final = _bin_calibrated_decision(features_final)
 
     out: Dict[str, Any] = {
         "features_final": features_final,
-
         "oracle_used": oracle_used,
         "oracle_succeeded": oracle_succeeded,
         "oracle_failed": oracle_failed,
         "oracle_error": oracle_error,
         "oracle_error_code": oracle_error_code,
         "oracle_mode": oracle_mode,
-
         "unsup_status_pre_oracle": unsup_status_pre,
         "unsup_skip_reason_pre_oracle": unsup_skip_reason_pre,
         "unsup_status_final": unsup_status_final,
         "unsup_skip_reason_final": unsup_skip_reason_final,
         "unsup_status": unsup_status_final,
-
         "missing_critical": missing_critical_final,
         "integrity_flags": integrity_flags,
         "integrity_critical_flags": integrity_critical,
-
         "debug_unsup": {
             "raw_if": unsup_pre.get("raw_if"),
             "raw_lof": unsup_pre.get("raw_lof"),
@@ -1431,12 +1464,22 @@ def score_oracle(
             "missing_cols_sample": unsup_pre.get("missing_cols_sample"),
             "n_cols": unsup_pre.get("n_cols"),
         },
-
         "debug_unsup_after_oracle": unsup_final,
-
         "xgb_shadow": xgb,
         "bin_calibrated_before_oracle": bin_before_oracle,
         "bin_calibrated_final": bin_final,
+
+        # ✅ AJOUT: métriques stables (pour éviter tes null dans jq)
+        "unsup_pre_metrics": {
+            "missing_ratio": unsup_missing_ratio_pre,
+            "missing_count": unsup_missing_count_pre,
+            "n_cols": unsup_n_cols_pre,
+        },
+        "unsup_final_metrics": {
+            "missing_ratio": (float(unsup_final.get("missing_ratio", 0.0)) if unsup_final else None),
+            "missing_count": (int(unsup_final.get("missing_count", 0)) if unsup_final else None),
+            "n_cols": (int(unsup_final.get("n_cols", 0)) if unsup_final else None),
+        },
 
         "decision_trace": {
             "should_oracle": should_oracle,
@@ -1444,26 +1487,45 @@ def score_oracle(
             "reasons": reasons,
             "warn_is_shallow": warn_is_shallow,
             "xgb_ok_relaxes": xgb_ok_relaxes,
-
             "unsup_status_pre_oracle": unsup_status_pre,
             "unsup_status_final": unsup_status_final,
             "unsup_skip_reason_pre_oracle": unsup_skip_reason_pre,
             "unsup_skip_reason_final": unsup_skip_reason_final,
-
             "missing_critical_before": missing_critical_before,
             "missing_critical_final": missing_critical_final,
-
             "integrity_critical": bool(integrity_critical),
             "has_closes": has_closes,
             "closes_len": n_closes,
             "has_dates": has_dates,
             "dates_len": n_dates,
             "effective_lookback": int(effective_lookback),
-
             "oracle_used": oracle_used,
             "oracle_succeeded": oracle_succeeded,
             "oracle_failed": oracle_failed,
             "oracle_error_code": oracle_error_code,
+        },
+        "gating_debug": {
+            "should_oracle": should_oracle,
+            "reasons": reasons,
+            "warn_is_shallow": warn_is_shallow,
+            "xgb_ok_relaxes": xgb_ok_relaxes,
+            "warn_thr": warn_thr,
+            "ensemble": ensemble,
+            "warn_margin": WARN_MARGIN,
+            "xgb_ok_pblock_max": XGB_OK_PBLOCK_MAX,
+            "unsup_missing_ratio_pre": unsup_missing_ratio_pre,
+            "unsup_missing_count_pre": unsup_missing_count_pre,
+            "unsup_n_cols_pre": unsup_n_cols_pre,
+            "unsup_max_missing_ratio": UNSUP_MAX_MISSING_RATIO,
+            "unsup_max_missing_count": UNSUP_MAX_MISSING_COUNT,
+        },
+        "oracle_input_debug": {
+            "has_closes": has_closes,
+            "n_closes": n_closes,
+            "has_dates": has_dates,
+            "n_dates": n_dates,
+            "lookback_days_req": int(req.lookback_days),
+            "lookback_days_effective": int(effective_lookback),
         },
     }
 
@@ -1471,6 +1533,7 @@ def score_oracle(
         out["oracle_meta"] = oracle_meta
 
     return jsonable_encoder(out)
+
 
 
 
