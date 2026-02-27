@@ -68,9 +68,18 @@ models/*.onnx
 test_api.sh
 *.sh
 
-
+# =========================
+# Release archives
+# =========================
 models.tar.gz
-# Allow committing calibrated binary artifacts
+
+# =========================
+# ✅ Production model bundles (explicit allow)
+# =========================
 !models/bin_sigmoid.joblib
 !models/threshold_sigmoid.json
+!models/unsup_bundle.joblib
+
+
+
 
