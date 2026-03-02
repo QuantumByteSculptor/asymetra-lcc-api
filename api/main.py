@@ -11,6 +11,7 @@ import sqlite3
 import io
 import sys
 import traceback
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
@@ -41,8 +42,13 @@ logger = logging.getLogger(__name__)
 from features import DEFAULT_CONFIG, features_to_row, vector_columns  # type: ignore
 
 # Expert scoring layer (lazy-loaded per-asset bundles, graceful if dir missing)
+# Controlled by EXPERTS_ENABLED env var (default "0" = OFF)
 try:
-    from api.scoring import score_expert, list_loaded_experts, preload_experts as _preload_experts  # type: ignore
+    from api.scoring import (  # type: ignore
+        score_expert, list_loaded_experts,
+        preload_experts as _preload_experts,
+        is_experts_enabled, experts_health,
+    )
     _EXPERTS_AVAILABLE = True
 except Exception as _scoring_import_err:
     logger.warning("api/scoring.py not importable — expert scoring disabled: %s", _scoring_import_err)
@@ -50,6 +56,8 @@ except Exception as _scoring_import_err:
     def score_expert(*a, **kw): return None  # type: ignore
     def list_loaded_experts(): return []  # type: ignore
     def _preload_experts(): pass  # type: ignore
+    def is_experts_enabled(): return False  # type: ignore
+    def experts_health(): return {"enabled": False, "error": "scoring module not importable"}  # type: ignore
 
 from feature_utils import (  # type: ignore
     compute_dd_duration_recovery,
@@ -1238,9 +1246,8 @@ def health() -> Dict[str, Any]:
         # ✅ observabilité bundle
         "unsup_bundle_path": unsup_path_abs,
         "unsup_bundle_exists": bool(unsup_exists),
-        # Expert scoring layer
-        "experts_loaded": list_loaded_experts(),
-        "experts_available": _EXPERTS_AVAILABLE,
+        # Expert scoring layer (structured)
+        "experts": experts_health(),
     }
 
 
@@ -1299,15 +1306,23 @@ def score(req: ScoreRequest, x_api_key: Optional[str] = Header(default=None, ali
         resp["shadow"] = shadow_obj
 
     # Expert scoring (additive — does not replace existing fields)
-    try:
-        asset_type = str(req.asset_type or "").strip().lower()
-        expert_result = score_expert(feats, asset_type)
-        resp["expert_decision"] = expert_result
-        resp["expert_loaded"] = expert_result is not None
-    except Exception as _e:
+    # Guarded by EXPERTS_ENABLED env var (default OFF)
+    if is_experts_enabled():
+        try:
+            asset_type = str(req.asset_type or "").strip().lower()
+            expert_result = score_expert(feats, asset_type)
+            resp["expert_decision"] = expert_result
+            resp["expert_loaded"] = expert_result is not None
+        except Exception as _e:
+            error_id = uuid.uuid4().hex[:8]
+            logger.error("expert scoring error [%s]: %s", error_id, _e, exc_info=True)
+            resp["expert_decision"] = None
+            resp["expert_loaded"] = False
+            resp["expert_decision_error"] = f"{type(_e).__name__}: {_e}"
+            resp["expert_error_id"] = error_id
+    else:
         resp["expert_decision"] = None
         resp["expert_loaded"] = False
-        resp["expert_decision_error"] = f"{type(_e).__name__}: {_e}"
 
     return jsonable_encoder(resp)
 
@@ -1596,15 +1611,23 @@ def score_oracle(
         out["oracle_meta"] = oracle_meta
 
     # Expert scoring (additive — does not replace existing fields)
-    try:
-        at = str(features_final.get("asset_type") or lovable_feats.get("asset_type") or "").strip().lower()
-        expert_result = score_expert(features_final, at)
-        out["expert_decision"] = expert_result
-        out["expert_loaded"] = expert_result is not None
-    except Exception as _e:
+    # Guarded by EXPERTS_ENABLED env var (default OFF)
+    if is_experts_enabled():
+        try:
+            at = str(features_final.get("asset_type") or lovable_feats.get("asset_type") or "").strip().lower()
+            expert_result = score_expert(features_final, at)
+            out["expert_decision"] = expert_result
+            out["expert_loaded"] = expert_result is not None
+        except Exception as _e:
+            error_id = uuid.uuid4().hex[:8]
+            logger.error("expert scoring error [%s]: %s", error_id, _e, exc_info=True)
+            out["expert_decision"] = None
+            out["expert_loaded"] = False
+            out["expert_decision_error"] = f"{type(_e).__name__}: {_e}"
+            out["expert_error_id"] = error_id
+    else:
         out["expert_decision"] = None
         out["expert_loaded"] = False
-        out["expert_decision_error"] = f"{type(_e).__name__}: {_e}"
 
     return jsonable_encoder(out)
 
