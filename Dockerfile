@@ -35,7 +35,7 @@ ENV SUP_BUNDLE_PATH=/app/models/sup_bundle.joblib
 # ============================
 # Start API
 # ============================
-CMD ["python", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "python -m uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 
 
 

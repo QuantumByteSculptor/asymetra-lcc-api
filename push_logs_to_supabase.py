@@ -25,7 +25,7 @@ def prepare_row(j):
         "asset_type": j.get("asset_type"),
         "market": j.get("market"),
         "final_status": j.get("final_status") or (j.get("unsup") or {}).get("status"),
-        "deterministic_reasons": json.dumps(j.get("deterministic_reasons") or j.get("deterministic_reasons") or []),
+        "deterministic_reasons": json.dumps(j.get("deterministic_reasons") or []),
         "unsup_raw_if": (j.get("unsup") or {}).get("raw_if"),
         "unsup_raw_lof": (j.get("unsup") or {}).get("raw_lof"),
         "unsup_z_if": (j.get("unsup") or {}).get("z_if"),

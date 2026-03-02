@@ -47,8 +47,6 @@ def features_to_vector(features: Dict[str, Any]) -> np.ndarray:
             row.append(np.nan)
 
     # one-hot simple
-    asset_type = str(features.get("asset_type", "OTHER")).upper()
-    # On stocke en upper? Non, on normalise:
     asset_type = str(features.get("asset_type", "other")).lower()
     market = str(features.get("market", "OTHER")).upper()
 

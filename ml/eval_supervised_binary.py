@@ -38,7 +38,7 @@ def main():
 
     bundle: Dict[str, Any] = joblib.load(args.model)
     clf = bundle["model"]
-    cols: List[str] = bundle.get("columns") or vector_columns(DEFAULT_CONFIG)
+    cols: List[str] = bundle.get("cols") or bundle.get("columns") or vector_columns(DEFAULT_CONFIG)
     thr = float(args.threshold if args.threshold is not None else bundle.get("threshold", 0.5))
 
     X_rows: List[List[float]] = []
@@ -49,9 +49,8 @@ def main():
         feats = rec.get("features") or {}
         if label not in ("ok", "warn", "block"):
             continue
-        row = features_to_row(feats, cols, DEFAULT_CONFIG)
-        if row is None:
-            continue
+        row_dict = features_to_row(feats, cfg=DEFAULT_CONFIG)
+        row = [float(row_dict.get(c, 0.0) or 0.0) for c in cols]
         X_rows.append(row)
         y.append(_bin_label(label))
 
