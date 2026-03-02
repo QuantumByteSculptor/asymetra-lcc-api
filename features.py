@@ -50,6 +50,17 @@ NUMERIC_BASE: List[str] = [
     "z_if",
     "z_lof",
     "z_gap_if_lof",
+
+    # v2: downside risk & volatility dynamics
+    "downside_dev",
+    "semivariance",
+    "vol_of_vol",
+    "worst_5d_ret",
+    "worst_20d_ret",
+    "autocorr_1",
+    "vol_ewma_ann",
+    "stress_var99",
+    "stress_multiplier",
 ]
 
 
@@ -82,6 +93,10 @@ DERIVED: List[str] = [
     "log_n_used",              # log(1+n_used)
     "dd_duration_per_n",        # dd_duration / n_used
     "recovery_per_dd_dur",      # recovery_days / dd_duration
+
+    # v2 derived
+    "downside_div_vol",         # downside_dev / vol_ann (tail asymmetry index)
+    "worst_5d_vs_var99",        # abs(worst_5d_ret) / var99 (stress vs normal tail risk)
 ]
 
 
@@ -105,6 +120,7 @@ class FeatureConfig:
     derived: Tuple[str, ...] = tuple(DERIVED)
     asset_types: Tuple[str, ...] = tuple(ASSET_TYPES)
     markets: Tuple[str, ...] = tuple(MARKETS)
+    version: str = "v2"
 
     @property
     def numeric_columns(self) -> List[str]:
@@ -184,6 +200,9 @@ def compute_derived(feats: Dict[str, Any]) -> Dict[str, float]:
     dd_duration = _to_float(feats.get("dd_duration"))
     recovery_days = _to_float(feats.get("recovery_days"))
 
+    downside_dev = _to_float(feats.get("downside_dev"))
+    worst_5d_ret = _to_float(feats.get("worst_5d_ret"))
+
     sqrt252 = math.sqrt(252.0)
 
     # volatility normalization helpers
@@ -230,6 +249,10 @@ def compute_derived(feats: Dict[str, Any]) -> Dict[str, float]:
         # dd dynamics normalization
         "dd_duration_per_n": _safe_div(dd_duration, n_used),
         "recovery_per_dd_dur": _safe_div(recovery_days, dd_duration),
+
+        # v2 derived
+        "downside_div_vol": _safe_div(downside_dev, vol_ann),
+        "worst_5d_vs_var99": _safe_div(abs(worst_5d_ret) if math.isfinite(worst_5d_ret) else float("nan"), var99),
     }
 
     return out

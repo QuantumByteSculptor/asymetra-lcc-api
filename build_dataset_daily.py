@@ -9,11 +9,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import sys
+from pathlib import Path as _Path
+_REPO_ROOT = str(_Path(__file__).resolve().parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import joblib
 import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
+
+from feature_utils import compute_all_v2_features  # type: ignore
 
 
 # ============================================================
@@ -197,6 +205,23 @@ def add_unsup_zscores_inplace(feats: Dict[str, Any], unsup: Dict[str, Any]) -> N
 # ============================================================
 # Feature engineering (per window)
 # ============================================================
+def _skew_kurtosis_np(x: np.ndarray):
+    """Pure-numpy skew and excess kurtosis (matches api/main.py helper)."""
+    x = x[np.isfinite(x)]
+    n = len(x)
+    if n < 20:
+        return float("nan"), float("nan")
+    m = x.mean()
+    c = x - m
+    s2 = float(np.mean(c * c))
+    if s2 <= 1e-18:
+        return 0.0, -3.0
+    s = np.sqrt(s2)
+    skew = float(np.mean(c ** 3) / (s ** 3 + 1e-12))
+    kurt_excess = float(np.mean(c ** 4) / (s2 ** 2 + 1e-12) - 3.0)
+    return skew, kurt_excess
+
+
 def build_features(
     ticker: str,
     asset_type: str,
@@ -205,11 +230,15 @@ def build_features(
     returns: pd.Series,
 ) -> Dict[str, Any]:
     ret20 = returns.tail(20).dropna()
+    ret60 = returns.tail(60).dropna()
+    ret120 = returns.tail(120).dropna()
     ret252 = returns.tail(252).dropna()
     if len(ret20) < 10 or len(ret252) < 60:
         return {}
 
     vol_20d = float(np.std(ret20.to_numpy(dtype=float), ddof=1))
+    vol_60d = float(np.std(ret60.to_numpy(dtype=float), ddof=1) * np.sqrt(252)) if len(ret60) >= 20 else float("nan")
+    vol_120d = float(np.std(ret120.to_numpy(dtype=float), ddof=1) * np.sqrt(252)) if len(ret120) >= 40 else float("nan")
     vol_ann = realized_vol_ann(ret252)
     mdd = max_drawdown(closes)
 
@@ -223,33 +252,57 @@ def build_features(
     corr_mkt = 0.0
     max_dd = float(mdd)
 
-    dd_to_var99: Optional[float] = None
-    if np.isfinite(v99) and float(v99) > 0:
-        dd_to_var99 = float(abs(max_dd) / (float(v99) + 1e-12))
-
     tuw_pct = 95.0
-    tuw_per_dd = float(tuw_pct / (abs(max_dd) + 1e-6))
+
+    r = ret252.to_numpy(dtype=float)
+    px = closes.to_numpy(dtype=float)
+    skew, kurt_excess = _skew_kurtosis_np(r)
+
+    v2 = compute_all_v2_features(r, px, base_var99=(float(v99) if np.isfinite(v99) else None))
+
+    def _f(x) -> Optional[float]:
+        if x is None:
+            return None
+        try:
+            fv = float(x)
+            return fv if np.isfinite(fv) else None
+        except Exception:
+            return None
 
     return {
         "asset_type": (asset_type or "").strip().lower(),
         "market": (market or "").strip().upper(),
         "ticker": (ticker or "").strip(),
-        "vol_ann": float(vol_ann) if np.isfinite(vol_ann) else None,
-        "vol_20d": float(vol_20d) if np.isfinite(vol_20d) else None,
+        "vol_ann": _f(vol_ann),
+        "vol_20d": _f(vol_20d),
+        "vol_60d": _f(vol_60d),
+        "vol_120d": _f(vol_120d),
         "max_drawdown": float(max_dd),
         "max_dd": float(max_dd),
         "corr_mkt": float(corr_mkt),
-        "var95": float(v95) if np.isfinite(v95) else None,
-        "var99": float(v99) if np.isfinite(v99) else None,
-        "es95": float(e95) if np.isfinite(e95) else None,
-        "es99": float(e99) if np.isfinite(e99) else None,
+        "var95": _f(v95),
+        "var99": _f(v99),
+        "es95": _f(e95),
+        "es99": _f(e99),
         "n_used": int(n_used),
         "missing_pct": float(missing_pct),
         "tuw_pct": float(tuw_pct),
         "tail_obs_99": int(max(0, np.sum((-ret252).to_numpy(dtype=float) >= (v99 if np.isfinite(v99) else 1e9)))),
         "rsi": float(rsi(closes)) if len(closes) >= 20 else None,
-        "dd_to_var99": dd_to_var99,
-        "tuw_per_dd": tuw_per_dd,
+        "skew": _f(skew),
+        "kurtosis_excess": _f(kurt_excess),
+        # v2 features
+        "downside_dev": _f(v2.get("downside_dev")),
+        "semivariance": _f(v2.get("semivariance")),
+        "vol_of_vol": _f(v2.get("vol_of_vol")),
+        "worst_5d_ret": _f(v2.get("worst_5d_ret")),
+        "worst_20d_ret": _f(v2.get("worst_20d_ret")),
+        "autocorr_1": _f(v2.get("autocorr_1")),
+        "vol_ewma_ann": _f(v2.get("vol_ewma_ann")),
+        "stress_var99": _f(v2.get("stress_var99")),
+        "stress_multiplier": _f(v2.get("stress_multiplier")),
+        "dd_duration": v2.get("dd_duration"),
+        "recovery_days": v2.get("recovery_days"),
     }
 
 
