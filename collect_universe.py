@@ -24,6 +24,66 @@ def make_universe(seed: int = 42) -> List[Dict[str, str]]:
         "CSCO","TMO","ACN","MCD","NKE","DIS","LIN","WFC","PM","QCOM","INTU","TXN","AMAT","IBM","GE","CAT",
         "BA","NOW","SPGI","GS","MS","BLK","C","LOW","SBUX","DE","MDT","ISRG","ELV","VRTX","GILD","PFE",
         "UPS","HON","LMT","RTX","SCHW","ZTS","BKNG","ABNB","SNOW","PLTR","UBER","SHOP","SQ","PYPL","FDX",
+        # US mid-cap / growth (S&P 400 / Russell 2000 proxies, high data availability)
+        "NET","CRWD","DDOG","ZS","OKTA","FTNT","PANW","CYBR",
+        "MDB","ESTC","ELASTIC","DSGX","GTLB","BILL","ZI",
+        "ROKU","RBLX","HOOD","COIN","AFRM","SOFI","UPST","LC",
+        "TTD","APPS","MGNI","PUBM","CRTO",
+        "LYFT","GRAB","SE","MELI","NU","STNE",
+        "CELH","HIMS","TMDX","IRTC","AXNX","INSP","SWAV","PRCT",
+        "EXAS","NTRA","GH","VCYT","RXRX",
+        "AFRM","OPEN","OPENDOOR","OFFERPAD",
+        "SMAR","FROG","DOCN","BIGC","CLOU","WCLD",
+        "WING","LULU","DECK","CROX","ONON","SKX",
+        "HCA","MOH","CNC","CI","HUM",
+        "AMT","CCI","SBAC","DLR","EQIX",
+        "AVB","EQR","MAA","NLY","AGNC",
+        "LEN","PHM","DHI","TOL","NVR",
+        "CLF","NUE","STLD","RS","CMC",
+        "MPC","VLO","PSX","HES","DVN","FANG",
+        "CEG","VST","NRG","AES","PCG",
+        "WDAY","VEEV","HUBS","BRZE","SPRK",
+        "GLBE","RAMP","KRTX","TGTX","BCAB",
+        "WOLF","ON","MCHP","MPWR","SWKS","QRVO",
+        "ACLS","ENTG","MKSI","FORM","COHU","ACMR",
+        "NVST","RVTY","A","KEYS","TRMB",
+        "PODD","DXCM","ABMD","LMAT","NUVA",
+        "MTCH","PINS","SNAP","RDDT","BMBL",
+        "ZG","Z","RDFN","EXPI","OPEN",
+        "ETSY","CHWY","W","PRTS","OLO",
+        "HLT","MAR","H","WYNDM","STAY",
+        "DAL","UAL","AAL","LUV","ALK","HA",
+        "CCL","RCL","NCLH",
+        "CAR","HTZ","AVIS",
+        # More US growth / tech
+        "TWLO","ZM","DOCU","BOX","DROPBOX","DBX","PCTY","PAYC","SAIC","LDOS",
+        "CACI","MAXN","NOVA","ARRY","ENPH","SEDG","FSLR","SPWR",
+        "PLUG","FCEL","BLOOM","BLDP","CLNE",
+        "AMRC","HASI","BEPC","AY","CWEN","NEP",
+        "IRM","CUBE","EXR","NSA","REXR","TRNO",
+        "IIPR","SAFE","GMRE","PLYM",
+        "GLPI","VICI","MGM","WYNN","LVS","CZR","PENN",
+        "DKNG","FLUT","RSI","BALY",
+        "CPRI","TPR","RL","PVH","VFC","HBI","SKX",
+        "EL","COTY","REYN","CHD","CLX","HRL","K","GIS","CPB","CAG","SJM",
+        "MKC","FLO","THRM","INGR","WH","TAST","CMG","DPZ","BLMN",
+        "TXRH","JACK","EAT","DRI","CAKE","SHAK","RRGB",
+        "VLKAF","EADSF","RLLCF","RYCEY","BAESF",
+        # More biotech/pharma
+        "MRNA","BNTX","NVAX","REGN","BIIB","ALNY","BMRN","RARE","UTHR",
+        "HALO","ACAD","SAGE","SGEN","IMVT","KYMR","ARQT","DAWN",
+        "CRSP","BEAM","EDIT","NTLA","BLUE","SGMO","TALS",
+        # More semiconductors
+        "LRCX","KLAC","ASML","SNPS","CDNS","MRVL","SLAB","SITM","CRUS",
+        "DIOD","RMBS","AMBA","SMTC","AOSL","POWI",
+        # Industrial / Materials
+        "EMR","ETN","ROK","IR","GGG","FTV","GNRC","WTSLA",
+        "APD","ECL","PPG","SHW","VMC","MLM","FAST","GWW","MSC",
+        "ODFL","SAIA","XPO","CHRW","EXPD","JBHT","WERN",
+        # Financial
+        "KKR","APO","BX","CG","ARES","BLUE","OWL",
+        "MSTR","ICE","CME","CBOE","NDAQ","LPLA","RJF","EVR","LAZ","HLI",
+        "ALLY","SLM","CACC","OMF","EFC","NAVI",
     ]
 
     # -----------------------------
@@ -36,6 +96,14 @@ def make_universe(seed: int = 42) -> List[Dict[str, str]]:
         "ASML.AS","UNA.AS","INGA.AS","ADYEN.AS","PHIA.AS","DSM.AS",
         "IBE.MC","SAN.MC","ITX.MC","BBVA.MC",
         "ENEL.MI","ENI.MI","ISP.MI","STLAM.MI",
+        # Extra EU
+        "ABI.BR","UCB.BR","SOLB.BR","ACKB.BR",
+        "NOVN.SW","NESN.SW","ROG.SW","ZURN.SW","CFR.SW",
+        "NOKIA.HE","STERV.HE",
+        "VOLV-B.ST","ERICB.ST","SEB-A.ST","HM-B.ST","SAND.ST",
+        "NDA-FI.HE","NESTE.HE",
+        "OMV.VI","VIG.VI",
+        "CRH.L","KGF.L","SVT.L","SSE.L","IHG.L",
     ]
 
     # -----------------------------
@@ -73,15 +141,25 @@ def make_universe(seed: int = 42) -> List[Dict[str, str]]:
     # -----------------------------
     em_equity = [
         # China ADRs
-        "BABA","JD","PDD","BIDU","NIO","LI","XPEV",
+        "BABA","JD","PDD","BIDU","NIO","LI","XPEV","DIDI","LABD",
         # India (ADRs / US-listed)
-        "INFY","WIT","HDB","IBN",
+        "INFY","WIT","HDB","IBN","VEDL","SIFY","REDFY",
         # Brazil
-        "VALE","PBR","ITUB","NU",
+        "VALE","PBR","ITUB","NU","BRFS","GGBR","EMBR","BBAS",
         # Mexico
-        "FMX","BIMBOA.MX",  # local might fail, but ok to try
-        # Korea ADRs
-        "TSM",  # Taiwan (not KR, but Asia EM proxy)
+        "FMX","BIMBOA.MX",
+        # Korea / Taiwan ADRs
+        "TSM","ASX","UMC","HIMX",
+        # South Africa
+        "MTN","NPN","SHP",  # local tickers — ok to try
+        # Southeast Asia
+        "SEA","GRAB","GCT",
+        # Middle East (US-listed proxies)
+        "SAUDIF","ARAMCO",
+        # South Korea local
+        "005930.KS","000660.KS","035420.KS","051910.KS",
+        # Hong Kong
+        "0700.HK","9988.HK","3690.HK","0941.HK","2318.HK","0005.HK",
     ]
 
     # -----------------------------
@@ -90,16 +168,31 @@ def make_universe(seed: int = 42) -> List[Dict[str, str]]:
     etfs = [
         # US broad / style
         "SPY","IVV","VOO","QQQ","IWM","DIA","VTI","SCHB","RSP",
-        # Volatility / defensive
-        "USMV","SPLV","VTV","VUG","MTUM","QUAL",
-        # Rates / bonds
-        "IEF","TLT","SHY","LQD","HYG","TIP",
+        "MDY","IJH","IJR","VB","VO",
+        # Factor / style
+        "USMV","SPLV","VTV","VUG","MTUM","QUAL","VLUE","SIZE",
+        "MOAT","COWZ","CALF","DIVO","JEPI","JEPQ",
+        # Rates / bonds (full spectrum)
+        "IEF","TLT","SHY","LQD","HYG","TIP","BND","AGG","VCIT","VCSH",
+        "BSV","BIV","BLV","BKLN","FLOT","NEAR","SHV",
+        "EMB","PCY","VWOB","IAGG",
         # Regions
         "VEA","VWO","EWJ","EWU","FEZ","EEM","EFA","FXI","INDA","EWZ","EWW",
-        # Sector SPDRs
+        "EWG","EWQ","EWI","EWP","EWN","EWL","EWD","EWK","NORW",
+        "EWY","EWT","EIDO","THD","EWS","EWM","EWA","EWC","EWH",
+        # Sector SPDRs + alternatives
         "XLF","XLK","XLE","XLY","XLP","XLV","XLI","XLB","XLU","XLC",
+        "XLRE","XME","XOP","XBI","IBB","ARKG","ARKK","ARKF","ARKQ","ARKW",
+        "SOXX","SMH","HACK","BUG","CIBR",
+        "ICLN","QCLN","TAN","FAN","ACES",
+        "BOTZ","ROBO","IRBO","AIQ",
+        "HERO","ESPO","NERD",
         # Gold / commodities proxies
-        "GLD","SLV","USO","UNG","DBA","DBC",
+        "GLD","SLV","USO","UNG","DBA","DBC","PDBC",
+        "GLDM","AAAU","IAU","SGOL",
+        # Multi-asset / alternatives
+        "VNQ","VNQI","RWX","REM","MORT",
+        "BITO","GBTC","ETHE",
     ]
 
     # -----------------------------

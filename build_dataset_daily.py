@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import multiprocessing
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -523,29 +525,124 @@ def download_close_with_fallback(
 
 
 # ============================================================
+# Multiprocessing worker (module-level = picklable on macOS)
+# ============================================================
+def _worker(task: Dict[str, Any]) -> Tuple[List[str], str, Optional[str]]:
+    """
+    Process one ticker.  Returns (json_lines, ticker, error_msg|None).
+    All params come through the `task` dict so Pool.imap works without closures.
+    """
+    ticker = task["ticker"]
+    asset_type = task["asset_type"]
+    market = task["market"]
+    start = task["start"]
+    end = task["end"]
+    lookback_days = task["lookback_days"]
+    horizon_days = task["horizon_days"]
+    step_days = task["step_days"]
+    max_per_ticker = task["max_per_ticker"]
+    max_tries = task["max_tries"]
+    sleep_try = task["sleep_try"]
+    prefer = task["prefer"]
+    rules = LabelRules(horizon_days=horizon_days)
+
+    try:
+        close, src = download_close_with_fallback(
+            ticker=ticker,
+            market=market,
+            start=start,
+            end=end,
+            max_tries=max_tries,
+            sleep_try=sleep_try,
+            prefer=prefer,
+        )
+
+        close = pd.Series(close).dropna()
+        if close.empty:
+            return [], ticker, "empty close series"
+
+        ret = close.pct_change()
+
+        min_len = lookback_days + horizon_days + 30
+        if len(close) < min_len:
+            return [], ticker, f"too short len={len(close)} need={min_len} [{src}]"
+
+        min_end = lookback_days
+        max_end = len(close) - horizon_days - 1
+        available = max_end - min_end
+        if available <= 10:
+            return [], ticker, f"not enough window room [{src}]"
+
+        end_ixs = list(range(min_end, max_end + 1, step_days))
+        if len(end_ixs) > max_per_ticker:
+            # Evenly subsample if too many
+            idx = np.linspace(0, len(end_ixs) - 1, max_per_ticker, dtype=int)
+            end_ixs = [end_ixs[i] for i in idx]
+
+        lines: List[str] = []
+        for end_ix in end_ixs:
+            past_slice = slice(end_ix - lookback_days, end_ix)
+            fut_slice = slice(end_ix, end_ix + horizon_days)
+
+            px_past = close.iloc[past_slice]
+            ret_past = ret.iloc[past_slice]
+            px_fut = close.iloc[fut_slice]
+            ret_fut = ret.iloc[fut_slice]
+
+            feats = build_features(ticker, asset_type, market, px_past, ret_past)
+            if not feats:
+                continue
+
+            lab = label_from_future(px_past, ret_past, px_fut, ret_fut, rules)
+            feats["label_v2"] = lab
+
+            rec = {"label": lab, "label_v2": lab, "features": feats}
+            lines.append(json.dumps(rec, ensure_ascii=False))
+
+        return lines, ticker, None
+
+    except Exception as exc:
+        return [], ticker, str(exc)
+
+
+# ============================================================
 # Main
 # ============================================================
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--universe", default="data/universe.json")
-    ap.add_argument("--start", default="2015-01-01")
+    # New: date range via lookback_years instead of --start
+    ap.add_argument("--start", default=None, help="Override start date (YYYY-MM-DD). Defaults to lookback_years ago.")
+    ap.add_argument("--lookback_years", type=int, default=5, help="Years of history to fetch (default 5).")
     ap.add_argument("--end", default=None)
     ap.add_argument("--lookback_days", type=int, default=252)
     ap.add_argument("--horizon_days", type=int, default=20)
-    ap.add_argument("--windows_per_ticker", type=int, default=120)
-    ap.add_argument("--out_dir", default="data/training")
-
-    ap.add_argument("--unsup_bundle", default=None, help="Optional unsup_bundle.joblib to add z_if/z_lof/z_gap_if_lof")
-
-    ap.add_argument("--sleep_ticker", type=float, default=0.0, help="Sleep between tickers (seconds)")
-    ap.add_argument("--max_tries", type=int, default=3, help="Retry count for yfinance calls")
-    ap.add_argument("--sleep_try", type=float, default=0.8, help="Base sleep between retries (seconds)")
-
+    # New: step_days replaces windows_per_ticker as the primary windowing param
+    ap.add_argument("--step_days", type=int, default=10, help="Step between rolling windows (days). Default 10.")
+    ap.add_argument("--windows_per_ticker", type=int, default=0, help="Legacy: max windows. 0 = use step_days logic.")
+    ap.add_argument("--max_per_ticker", type=int, default=60, help="Hard cap on windows per ticker. Default 60.")
+    # New: single output file (v2 format, label embedded in features)
+    ap.add_argument("--out", default=None, help="Single output JSONL (label_v2 embedded). If set, --out_dir is ignored.")
+    ap.add_argument("--out_dir", default="data/training", help="Output dir (3-file format, legacy).")
+    # New: multiprocessing
+    ap.add_argument("--workers", type=int, default=1, help="Parallel workers (multiprocessing). Default 1 (sequential).")
+    ap.add_argument("--unsup_bundle", default=None, help="Optional unsup_bundle.joblib to add z_if/z_lof/z_gap_if_lof (single-worker only).")
+    ap.add_argument("--sleep_ticker", type=float, default=0.0, help="Sleep between tickers (seconds, single-worker only).")
+    ap.add_argument("--max_tries", type=int, default=3)
+    ap.add_argument("--sleep_try", type=float, default=0.8)
     ap.add_argument("--prefer_provider", default="stooq", choices=["stooq", "yfinance"])
 
     args = ap.parse_args()
 
-    rules = LabelRules(horizon_days=int(args.horizon_days))
+    # Compute start date from lookback_years if --start not given
+    start_date: str
+    if args.start:
+        start_date = args.start
+    else:
+        cutoff = datetime.today() - timedelta(days=int(args.lookback_years) * 365 + 300)
+        start_date = cutoff.strftime("%Y-%m-%d")
+
+    end_date: Optional[str] = args.end
 
     uni_path = Path(args.universe)
     if not uni_path.exists():
@@ -555,123 +652,150 @@ def main() -> None:
     if not isinstance(uni, list):
         raise ValueError("Universe must be a JSON list of {ticker, asset_type, market} objects.")
 
-    unsup: Optional[Dict[str, Any]] = None
-    if args.unsup_bundle:
-        unsup = load_unsup_bundle(args.unsup_bundle)
-        print(f"✅ loaded unsup bundle: {args.unsup_bundle} (cols={len(unsup['columns'])})")
+    # Determine windowing mode
+    step_days = int(args.step_days)
+    max_per_ticker = int(args.max_per_ticker)
+    if args.windows_per_ticker and int(args.windows_per_ticker) > 0:
+        # Legacy mode: use windows_per_ticker as the cap
+        max_per_ticker = int(args.windows_per_ticker)
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    workers = max(1, int(args.workers))
 
-    out_ok = (out_dir / "train_ok.jsonl").open("w", encoding="utf-8")
-    out_warn = (out_dir / "train_warn.jsonl").open("w", encoding="utf-8")
-    out_block = (out_dir / "train_block.jsonl").open("w", encoding="utf-8")
-
-    counts = {"ok": 0, "warn": 0, "block": 0}
-    fails = 0
+    # Build task list (skip FX/futures/indices)
+    tasks: List[Dict[str, Any]] = []
     skipped = 0
-
     for item in uni:
         ticker = str(item.get("ticker", "")).strip()
         asset_type = str(item.get("asset_type", "")).strip()
         market = str(item.get("market", "")).strip()
-
-        skip_reason = should_skip_ticker_for_training(ticker)
-        if skip_reason:
+        reason = should_skip_ticker_for_training(ticker)
+        if reason:
             skipped += 1
-            print(f"↪︎ skip {ticker} ({skip_reason})")
             continue
+        tasks.append({
+            "ticker": ticker,
+            "asset_type": asset_type,
+            "market": market,
+            "start": start_date,
+            "end": end_date,
+            "lookback_days": int(args.lookback_days),
+            "horizon_days": int(args.horizon_days),
+            "step_days": step_days,
+            "max_per_ticker": max_per_ticker,
+            "max_tries": int(args.max_tries),
+            "sleep_try": float(args.sleep_try),
+            "prefer": str(args.prefer_provider),
+        })
 
-        try:
-            close, src = download_close_with_fallback(
-                ticker=ticker,
-                market=market,
-                start=str(args.start),
-                end=str(args.end) if args.end else None,
-                max_tries=int(args.max_tries),
-                sleep_try=float(args.sleep_try),
-                prefer=str(args.prefer_provider),
-            )
+    print(f"Universe: {len(uni)} tickers, {skipped} skipped, {len(tasks)} to process")
+    print(f"History: start={start_date}, end={end_date or 'today'}")
+    print(f"Windows: step={step_days}d, max_per_ticker={max_per_ticker}")
+    print(f"Workers: {workers}")
 
-            close = pd.Series(close).dropna()
-            if close.empty:
-                raise RuntimeError("empty close series after download")
+    # Open output
+    counts: Dict[str, int] = {"ok": 0, "warn": 0, "block": 0}
+    fails = 0
 
-            ret = close.pct_change()
+    if args.out:
+        # Single-file v2 format
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_file = out_path.open("w", encoding="utf-8")
+        out_ok = out_warn = out_block = None
+    else:
+        # Legacy 3-file format
+        out_dir = Path(args.out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = None
+        out_ok = (out_dir / "train_ok.jsonl").open("w", encoding="utf-8")
+        out_warn = (out_dir / "train_warn.jsonl").open("w", encoding="utf-8")
+        out_block = (out_dir / "train_block.jsonl").open("w", encoding="utf-8")
 
-            min_len = int(args.lookback_days) + int(args.horizon_days) + 30
-            if len(close) < min_len:
-                print(f"⚠️ {ticker} too short len={len(close)} (need {min_len}) [{src}]")
-                fails += 1
-                continue
+    # Load unsup bundle for z-score injection (single-worker mode only)
+    unsup: Optional[Dict[str, Any]] = None
+    if args.unsup_bundle and workers == 1:
+        unsup = load_unsup_bundle(args.unsup_bundle)
+        print(f"✅ loaded unsup bundle: {args.unsup_bundle} (cols={len(unsup['columns'])})")
+    elif args.unsup_bundle and workers > 1:
+        print("⚠️  --unsup_bundle ignored in multi-worker mode (not picklable). Run z-score injection separately.")
 
-            min_end = int(args.lookback_days)
-            max_end = len(close) - int(args.horizon_days) - 1
-            available = max_end - min_end
-            if available <= 10:
-                print(f"⚠️ {ticker} not enough window room (len={len(close)}) [{src}]")
-                fails += 1
-                continue
+    def _write_lines(lines: List[str], label: str) -> None:
+        if out_file is not None:
+            for ln in lines:
+                out_file.write(ln + "\n")
+        else:
+            f = out_ok if label == "ok" else (out_warn if label == "warn" else out_block)
+            for ln in lines:
+                f.write(ln + "\n")  # type: ignore[union-attr]
 
-            end_ixs = np.linspace(
-                min_end,
-                max_end,
-                num=min(int(args.windows_per_ticker), available),
-                dtype=int,
-            )
-
-            wrote = 0
-            for end_ix in end_ixs:
-                past_slice = slice(end_ix - int(args.lookback_days), end_ix)
-                fut_slice = slice(end_ix, end_ix + int(args.horizon_days))
-
-                px_past = close.iloc[past_slice]
-                ret_past = ret.iloc[past_slice]
-                px_fut = close.iloc[fut_slice]
-                ret_fut = ret.iloc[fut_slice]
-
-                feats = build_features(ticker, asset_type, market, px_past, ret_past)
-                if not feats:
-                    continue
-
-                if unsup is not None:
-                    add_unsup_zscores_inplace(feats, unsup)
-
-                lab = label_from_future(px_past, ret_past, px_fut, ret_fut, rules)
-
-                rec = {"label": lab, "features": feats}
-                line = json.dumps(rec, ensure_ascii=False)
-
-                if lab == "ok":
-                    out_ok.write(line + "\n")
-                elif lab == "warn":
-                    out_warn.write(line + "\n")
-                else:
-                    out_block.write(line + "\n")
-
-                counts[lab] += 1
-                wrote += 1
-
-            print(f"✅ {ticker} done (windows={wrote}) [{src}]")
-
-            if float(args.sleep_ticker) > 0:
-                time.sleep(float(args.sleep_ticker))
-
-        except Exception as e:
+    def _handle_result(result: Tuple[List[str], str, Optional[str]]) -> None:
+        nonlocal fails
+        lines, ticker, err = result
+        if err:
             fails += 1
-            print(f"⚠️ {ticker} failed: {e}")
+            print(f"⚠️  {ticker}: {err}")
+            return
+        for ln in lines:
+            rec = json.loads(ln)
+            lab = rec.get("label", "ok")
+            counts[lab] = counts.get(lab, 0) + 1
+        _write_lines(lines, "")  # label-split done inside _worker already via out_file
+        if lines:
+            print(f"✅ {ticker} done (windows={len(lines)})")
+
+    if workers > 1:
+        with multiprocessing.Pool(processes=workers) as pool:
+            for result in pool.imap_unordered(_worker, tasks, chunksize=1):
+                _handle_result(result)
+    else:
+        # Sequential (allows sleep + unsup z-score injection)
+        for task in tasks:
+            lines, ticker, err = _worker(task)
+            if err:
+                fails += 1
+                print(f"⚠️  {ticker}: {err}")
+            else:
+                # Inject unsup z-scores if bundle loaded
+                if unsup is not None and lines:
+                    enriched: List[str] = []
+                    for ln in lines:
+                        rec = json.loads(ln)
+                        feats = rec.get("features", {})
+                        add_unsup_zscores_inplace(feats, unsup)
+                        rec["features"] = feats
+                        enriched.append(json.dumps(rec, ensure_ascii=False))
+                    lines = enriched
+
+                for ln in lines:
+                    rec = json.loads(ln)
+                    lab = rec.get("label", "ok")
+                    counts[lab] = counts.get(lab, 0) + 1
+                    _write_lines([ln], lab)
+
+                if lines:
+                    print(f"✅ {ticker} done (windows={len(lines)})")
+
             if float(args.sleep_ticker) > 0:
                 time.sleep(float(args.sleep_ticker))
 
-    out_ok.close()
-    out_warn.close()
-    out_block.close()
+    # Close outputs
+    if out_file is not None:
+        out_file.close()
+    if out_ok is not None:
+        out_ok.close()
+        out_warn.close()  # type: ignore[union-attr]
+        out_block.close()  # type: ignore[union-attr]
 
+    total = sum(counts.values())
     print("\n--- DONE ---")
+    print(f"Total records: {total}")
     print("counts:", counts)
-    print("fails:", fails)
-    print("skipped:", skipped)
-    print(f"written to: {out_dir}")
+    print(f"fails: {fails} / {len(tasks)}")
+    print(f"skipped (filter): {skipped}")
+    if args.out:
+        print(f"output: {args.out}")
+    else:
+        print(f"output dir: {args.out_dir}")
 
 
 if __name__ == "__main__":
