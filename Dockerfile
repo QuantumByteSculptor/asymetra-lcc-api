@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ============================
 COPY api /app/api
 COPY features.py /app/features.py
+COPY feature_utils.py /app/feature_utils.py
 COPY configs/thresholds_config.py /app/thresholds_config.py
 
 # 🔥 IMPORTANT: copy models from repo
