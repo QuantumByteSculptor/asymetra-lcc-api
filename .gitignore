@@ -53,6 +53,8 @@ models/*.joblib
 models/*.pkl
 models/*.bin
 models/*.onnx
+# v3 trained artifacts — never version, regenerate with train_v3.py
+models/v3/
 
 # =========================
 # Secrets / env
@@ -87,12 +89,16 @@ models.tar.gz
 !models/experts/*.joblib
 
 # =========================
-# ✅ Metrics reports (explicit allow)
+# Generated metrics / reports (not versioned — regenerate from pipeline)
 # =========================
-!data/
-!data/metrics/
-!data/metrics/*.json
-!data/metrics/*.txt
+data/metrics/
+data/training/v3/
+
+# =========================
+# ✅ Legacy expert v2 reports (explicit allow — small, reference)
+# =========================
+!data/metrics/experts_v2_report.json
+!data/metrics/experts_v2_report.txt
 
 
 
