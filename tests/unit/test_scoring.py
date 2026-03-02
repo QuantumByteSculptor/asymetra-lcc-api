@@ -1,7 +1,13 @@
 # tests/unit/test_scoring.py
-"""Unit tests for api/scoring.py expert scoring layer."""
+"""Unit tests for api/scoring.py expert scoring layer.
+
+All tests in this file run with EXPERTS_ENABLED=1 so that bundle
+loading and scoring actually execute (the feature flag itself is
+tested in test_experts_flag.py).
+"""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -22,6 +28,13 @@ def clear_expert_cache():
     scoring._EXPERT_CACHE.clear()
     yield
     scoring._EXPERT_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _enable_experts():
+    """All tests in this module require EXPERTS_ENABLED=1."""
+    with patch.dict(os.environ, {"EXPERTS_ENABLED": "1"}):
+        yield
 
 
 class TestLoadExpertBundle:

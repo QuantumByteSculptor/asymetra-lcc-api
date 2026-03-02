@@ -2,14 +2,19 @@
 """
 Integration tests for the FastAPI endpoints.
 Uses httpx.AsyncClient or falls back to direct function calls if httpx unavailable.
+
+Tests run with EXPERTS_ENABLED=0 (default) unless explicitly patched,
+matching production default behaviour.
 """
 from __future__ import annotations
 
 import json
+import os
 import random
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
+from unittest.mock import patch
 
 import pytest
 
@@ -61,11 +66,13 @@ class TestHealth:
         data = client.get("/health").json()
         assert data.get("ok") is True
 
-    def test_health_has_experts_fields(self, client):
+    def test_health_has_experts_block(self, client):
         data = client.get("/health").json()
-        assert "experts_loaded" in data
-        assert "experts_available" in data
-        assert isinstance(data["experts_loaded"], list)
+        assert "experts" in data
+        experts = data["experts"]
+        assert "enabled" in experts
+        assert "bundles_on_disk" in experts
+        assert isinstance(experts["bundles_on_disk"], list)
 
     def test_health_has_version(self, client):
         data = client.get("/health").json()
@@ -73,7 +80,7 @@ class TestHealth:
 
 
 # ---------------------------------------------------------------------------
-# /score
+# /score (experts disabled by default)
 # ---------------------------------------------------------------------------
 
 class TestScore:
@@ -88,16 +95,15 @@ class TestScore:
 
     def test_score_has_expert_decision(self, client, base_feats):
         data = client.post("/score", json=base_feats).json()
-        # expert_decision must be present (may be None if no bundle)
+        # expert_decision must be present (None when disabled)
         assert "expert_decision" in data
         assert "expert_loaded" in data
 
-    def test_score_expert_decision_structure(self, client, v2_feats):
-        data = client.post("/score", json=v2_feats).json()
-        ed = data.get("expert_decision")
-        if ed is not None:
-            assert "expert_status" in ed
-            assert ed["expert_status"] in ("ok", "warn", "block")
+    def test_score_experts_disabled_returns_null(self, client, base_feats):
+        """With default EXPERTS_ENABLED=0, expert_decision is null."""
+        data = client.post("/score", json=base_feats).json()
+        assert data["expert_decision"] is None
+        assert data["expert_loaded"] is False
 
     def test_score_etf_expert(self, client):
         feats = {
