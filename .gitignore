@@ -80,6 +80,20 @@ models.tar.gz
 !models/threshold_sigmoid.json
 !models/unsup_bundle.joblib
 
+# =========================
+# ✅ Expert v2 bundles (explicit allow)
+# =========================
+!models/experts/
+!models/experts/*.joblib
+
+# =========================
+# ✅ Metrics reports (explicit allow)
+# =========================
+!data/
+!data/metrics/
+!data/metrics/*.json
+!data/metrics/*.txt
+
 
 
 

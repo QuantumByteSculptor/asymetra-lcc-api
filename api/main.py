@@ -40,6 +40,26 @@ logger = logging.getLogger(__name__)
 # Reuse your existing feature builder (from your ML LCC project)
 from features import DEFAULT_CONFIG, features_to_row, vector_columns  # type: ignore
 
+# Expert scoring layer (lazy-loaded per-asset bundles, graceful if dir missing)
+try:
+    from api.scoring import score_expert, list_loaded_experts, preload_experts as _preload_experts  # type: ignore
+    _EXPERTS_AVAILABLE = True
+except Exception as _scoring_import_err:
+    logger.warning("api/scoring.py not importable — expert scoring disabled: %s", _scoring_import_err)
+    _EXPERTS_AVAILABLE = False
+    def score_expert(*a, **kw): return None  # type: ignore
+    def list_loaded_experts(): return []  # type: ignore
+    def _preload_experts(): pass  # type: ignore
+
+from feature_utils import (  # type: ignore
+    compute_dd_duration_recovery,
+    compute_downside_dev,
+    compute_semivariance,
+    compute_vol_of_vol,
+    compute_worst_rolling_return,
+    compute_autocorr,
+)
+
 
 # =============================
 # Config
@@ -648,9 +668,13 @@ def _oracle_compute_from_closes(
     rets = closes.pct_change().dropna()
 
     ret20 = rets.tail(20)
+    ret60 = rets.tail(60)
+    ret120 = rets.tail(120)
     ret252 = rets.tail(lookback_days)
 
     vol_20d = float(np.std(ret20.to_numpy(dtype=float), ddof=1)) if len(ret20) >= 10 else float("nan")
+    vol_60d = float(np.std(ret60.to_numpy(dtype=float), ddof=1) * np.sqrt(252)) if len(ret60) >= 20 else float("nan")
+    vol_120d = float(np.std(ret120.to_numpy(dtype=float), ddof=1) * np.sqrt(252)) if len(ret120) >= 40 else float("nan")
     vol_ann = _realized_vol_ann(ret252)
     mdd = _max_drawdown(closes)
 
@@ -663,36 +687,61 @@ def _oracle_compute_from_closes(
     tail_obs_99 = int(max(0, np.sum((-ret252).to_numpy(dtype=float) >= (v99 if np.isfinite(v99) else 1e9))))
 
     r = ret252.to_numpy(dtype=float)
+    px = closes.to_numpy(dtype=float)
     skew, kurt_excess = _skew_kurtosis(r)
     vol_ewma_ann = _ewma_vol_ann(r, lam=0.94, ann=252)
     vol_garch_ann = _garch_vol_ann(r, ann=252)
     stress = _stress_var(r, base_var99=(v99 if np.isfinite(v99) else None), window=20, q=0.99)
 
+    # v2 features
+    dd_duration, recovery_days = compute_dd_duration_recovery(px)
+    downside_dev = compute_downside_dev(r)
+    semivariance = compute_semivariance(r)
+    vol_of_vol = compute_vol_of_vol(r)
+    worst_5d_ret = compute_worst_rolling_return(r, 5)
+    worst_20d_ret = compute_worst_rolling_return(r, 20)
+    autocorr_1 = compute_autocorr(r)
+
+    def _f(x: float) -> Optional[float]:
+        return float(x) if np.isfinite(x) else None
+
     return {
         "asset_type": asset_type,
         "market": market,
         "ticker": ticker,
-        "vol_ann": float(vol_ann) if np.isfinite(vol_ann) else None,
-        "vol_20d": float(vol_20d) if np.isfinite(vol_20d) else None,
+        "vol_ann": _f(vol_ann),
+        "vol_20d": _f(vol_20d),
+        "vol_60d": _f(vol_60d),
+        "vol_120d": _f(vol_120d),
         "max_drawdown": float(mdd),
-        "var95": float(v95) if np.isfinite(v95) else None,
-        "var99": float(v99) if np.isfinite(v99) else None,
-        "es95": float(e95) if np.isfinite(e95) else None,
-        "es99": float(e99) if np.isfinite(e99) else None,
+        "max_dd": float(mdd),
+        "var95": _f(v95),
+        "var99": _f(v99),
+        "es95": _f(e95),
+        "es99": _f(e99),
         "n_used": n_used,
         "missing_pct": missing_pct,
         "tuw_pct": 95.0,
         "tail_obs_99": tail_obs_99,
         "rsi": float(_rsi(closes)) if len(closes) >= 20 else None,
         "corr_mkt": 0.0,
-        "skew": float(skew) if np.isfinite(skew) else None,
-        "kurtosis_excess": float(kurt_excess) if np.isfinite(kurt_excess) else None,
-        "vol_ewma_ann": float(vol_ewma_ann) if np.isfinite(vol_ewma_ann) else None,
+        "skew": _f(skew),
+        "kurtosis_excess": _f(kurt_excess),
+        "vol_ewma_ann": _f(vol_ewma_ann),
         "vol_garch_ann": float(vol_garch_ann) if vol_garch_ann is not None and np.isfinite(vol_garch_ann) else None,
         "stress_var99": stress.get("stress_var99"),
         "stress_multiplier": stress.get("stress_multiplier"),
         "stress_window_days": stress.get("stress_window_days"),
         "stress_cumret": stress.get("stress_cumret"),
+        # v2
+        "dd_duration": dd_duration if dd_duration > 0 else None,
+        "recovery_days": recovery_days if recovery_days > 0 else None,
+        "downside_dev": _f(downside_dev),
+        "semivariance": _f(semivariance),
+        "vol_of_vol": _f(vol_of_vol),
+        "worst_5d_ret": _f(worst_5d_ret),
+        "worst_20d_ret": _f(worst_20d_ret),
+        "autocorr_1": _f(autocorr_1),
     }
 
 
@@ -1189,6 +1238,9 @@ def health() -> Dict[str, Any]:
         # ✅ observabilité bundle
         "unsup_bundle_path": unsup_path_abs,
         "unsup_bundle_exists": bool(unsup_exists),
+        # Expert scoring layer
+        "experts_loaded": list_loaded_experts(),
+        "experts_available": _EXPERTS_AVAILABLE,
     }
 
 
@@ -1245,6 +1297,17 @@ def score(req: ScoreRequest, x_api_key: Optional[str] = Header(default=None, ali
 
     if shadow_obj:
         resp["shadow"] = shadow_obj
+
+    # Expert scoring (additive — does not replace existing fields)
+    try:
+        asset_type = str(req.asset_type or "").strip().lower()
+        expert_result = score_expert(feats, asset_type)
+        resp["expert_decision"] = expert_result
+        resp["expert_loaded"] = expert_result is not None
+    except Exception as _e:
+        resp["expert_decision"] = None
+        resp["expert_loaded"] = False
+        resp["expert_decision_error"] = f"{type(_e).__name__}: {_e}"
 
     return jsonable_encoder(resp)
 
@@ -1531,6 +1594,17 @@ def score_oracle(
 
     if oracle_meta is not None:
         out["oracle_meta"] = oracle_meta
+
+    # Expert scoring (additive — does not replace existing fields)
+    try:
+        at = str(features_final.get("asset_type") or lovable_feats.get("asset_type") or "").strip().lower()
+        expert_result = score_expert(features_final, at)
+        out["expert_decision"] = expert_result
+        out["expert_loaded"] = expert_result is not None
+    except Exception as _e:
+        out["expert_decision"] = None
+        out["expert_loaded"] = False
+        out["expert_decision_error"] = f"{type(_e).__name__}: {_e}"
 
     return jsonable_encoder(out)
 
