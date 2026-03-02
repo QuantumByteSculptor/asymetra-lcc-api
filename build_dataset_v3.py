@@ -200,10 +200,54 @@ def _stooq_download(ticker: str, market: str) -> pd.Series:
     raise RuntimeError(f"stooq failed for {ticker}: {last_err}")
 
 
-def _yf_download(ticker: str, start: str, max_tries: int = 3) -> pd.Series:
-    """Download close prices from Yahoo Finance."""
-    import yfinance as yf
+def _yahoo_direct_download(ticker: str, start: str) -> pd.Series:
+    """
+    Download close prices via Yahoo Finance chart API v8 (no yfinance dependency).
+    More reliable for FX (=X), futures (=F), crypto (-USD), indices (^).
+    """
+    from datetime import timezone as _tz
+    start_ts = int(datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=_tz.utc).timestamp())
+    end_ts = int(datetime.now(tz=_tz.utc).timestamp())
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        f"?interval=1d&period1={start_ts}&period2={end_ts}"
+    )
+    r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+    j = r.json()
+    result = (j.get("chart") or {}).get("result") or []
+    if not result:
+        err = (j.get("chart") or {}).get("error")
+        raise RuntimeError(f"Yahoo API no result for {ticker}: {err}")
+    timestamps = result[0].get("timestamp") or []
+    quotes = result[0].get("indicators", {}).get("quote", [{}])
+    closes = (quotes[0] if quotes else {}).get("close") or []
+    if not timestamps or not closes:
+        raise RuntimeError(f"Yahoo API empty data for {ticker}")
+    dates = pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(None)
+    s = pd.Series(
+        [float(c) if c is not None else float("nan") for c in closes],
+        index=dates,
+    ).dropna()
+    if s.empty:
+        raise RuntimeError(f"Yahoo API all-NaN closes for {ticker}")
+    return s
 
+
+def _yf_download(ticker: str, start: str, max_tries: int = 3) -> pd.Series:
+    """
+    Download close prices from Yahoo Finance.
+    Tries direct chart API first (reliable for =X/=F/^/-USD tickers),
+    falls back to yfinance library.
+    """
+    # Direct API — works for all ticker types including FX, futures, crypto, indices
+    try:
+        return _yahoo_direct_download(ticker, start)
+    except Exception as e_direct:
+        pass
+
+    # Fallback: yfinance library (works for plain equity/etf tickers)
+    import yfinance as yf
     last_err = None
     for attempt in range(max_tries):
         try:
@@ -221,7 +265,7 @@ def _yf_download(ticker: str, start: str, max_tries: int = 3) -> pd.Series:
             last_err = e
         time.sleep(0.8 * (1.4 ** attempt))
 
-    raise RuntimeError(f"yfinance failed for {ticker}: {last_err}")
+    raise RuntimeError(f"yfinance failed for {ticker}: direct={e_direct}; lib={last_err}")
 
 
 def download_close(
