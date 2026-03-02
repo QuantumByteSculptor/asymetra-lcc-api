@@ -153,6 +153,86 @@ def _with_retry(fn, max_tries: int = 3, base_sleep: float = 0.8):
 
 
 # ---------------------------------------------------------------------------
+# Yahoo Finance v8 direct API (no yfinance library — avoids YFTzMissingError)
+# ---------------------------------------------------------------------------
+def _yahoo_direct_download(ticker: str, start: str) -> pd.Series:
+    """Download via Yahoo Finance chart API v8 (no yfinance dep). Works for all ticker types."""
+    from datetime import timezone as _tz
+    start_ts = int(datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=_tz.utc).timestamp())
+    end_ts   = int(datetime.now(tz=_tz.utc).timestamp())
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        f"?interval=1d&period1={start_ts}&period2={end_ts}"
+    )
+    r = requests.get(url, timeout=30, headers={
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept": "application/json",
+    })
+    r.raise_for_status()
+    j = r.json()
+    result = (j.get("chart") or {}).get("result") or []
+    if not result:
+        err = (j.get("chart") or {}).get("error")
+        raise RuntimeError(f"Yahoo v8 no result for {ticker}: {err}")
+    timestamps = result[0].get("timestamp") or []
+    quotes = result[0].get("indicators", {}).get("quote", [{}])
+    closes = (quotes[0] if quotes else {}).get("close") or []
+    if not timestamps or not closes:
+        raise RuntimeError(f"Yahoo v8 empty data for {ticker}")
+    dates = pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(None)
+    s = pd.Series(
+        [float(c) if c is not None else float("nan") for c in closes],
+        index=dates,
+    ).dropna()
+    if s.empty:
+        raise RuntimeError(f"Yahoo v8 all-NaN for {ticker}")
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Disk cache — atomic parquet per (ticker, start_date)
+# ---------------------------------------------------------------------------
+_CACHE_DIR: Optional[Path] = None
+_SKIP_STOOQ: bool = False
+
+
+def _cache_path(ticker: str, start: str) -> Optional[Path]:
+    if _CACHE_DIR is None:
+        return None
+    safe = (
+        ticker.replace("/", "_").replace("=", "_EQ_")
+               .replace("^", "_HAT_").replace("-", "_DASH_")
+               .replace(".", "_DOT_")
+    )
+    return _CACHE_DIR / f"{safe}__{start.replace('-', '')}.parquet"
+
+
+def _cache_load(ticker: str, start: str) -> Optional[pd.Series]:
+    p = _cache_path(ticker, start)
+    if p is None or not p.exists():
+        return None
+    try:
+        df = pd.read_parquet(p)
+        s = pd.Series(df["close"], index=pd.DatetimeIndex(df.index)).dropna()
+        return s if not s.empty else None
+    except Exception:
+        return None
+
+
+def _cache_save(ticker: str, start: str, s: pd.Series) -> None:
+    p = _cache_path(ticker, start)
+    if p is None:
+        return
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        s.to_frame(name="close").to_parquet(tmp)
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Price download helpers
 # ---------------------------------------------------------------------------
 
@@ -245,29 +325,48 @@ def _stooq_download_raw(ticker: str, market: str) -> pd.Series:
 
 
 def _yf_download_raw(ticker: str, start: str, max_tries: int = 3) -> pd.Series:
-    """Download from yfinance (no retry — caller wraps with _with_retry)."""
-    import yfinance as yf  # lazy import — not available in all envs
+    """
+    Download from Yahoo Finance.
+    Order: (1) Yahoo v8 direct API, (2) yf.Ticker.history(), (3) yf.download() fallback.
+    Avoids YFTzMissingError that affects yf.download() on many tickers.
+    """
+    # 1. Yahoo direct v8 API — fastest, no yfinance dependency
+    try:
+        s = _yahoo_direct_download(ticker, start)
+        if s is not None and not s.empty:
+            return s
+    except Exception:
+        pass
+
+    import yfinance as yf  # lazy import
 
     last_err: Exception = RuntimeError("no attempts")
     for attempt in range(max_tries):
         try:
-            df = yf.download(
-                ticker,
-                start=start,
-                interval="1d",
-                auto_adjust=True,
-                progress=False,
-                threads=False,
-            )
-            close = _as_close_series(df, ticker)
-            s = pd.Series(close).dropna()
-            if not s.empty:
-                return s
-            last_err = RuntimeError("empty close series")
+            # 2. yf.Ticker.history() — avoids YFTzMissingError
+            t_obj = yf.Ticker(ticker)
+            df = t_obj.history(start=start, interval="1d", auto_adjust=True)
+            if df is not None and not df.empty and "Close" in df.columns:
+                s = pd.Series(df["Close"]).dropna()
+                if not s.empty:
+                    return s
+            last_err = RuntimeError("Ticker.history: empty close")
         except Exception as exc:
             last_err = exc
         if attempt < max_tries - 1:
             time.sleep(0.8 * (1.5 ** attempt))
+
+    # 3. Last resort: yf.download() (may hit YFTzMissingError but try anyway)
+    try:
+        df = yf.download(ticker, start=start, interval="1d",
+                         auto_adjust=True, progress=False, threads=False)
+        close = _as_close_series(df, ticker)
+        s = pd.Series(close).dropna()
+        if not s.empty:
+            return s
+    except Exception as e:
+        last_err = e
+
     raise RuntimeError(f"yfinance failed for {ticker}: {last_err}")
 
 
@@ -279,14 +378,21 @@ def download_close(
     max_tries: int = 3,
 ) -> Tuple[pd.Series, str]:
     """
-    Download close prices with provider routing and fallback.
+    Download close prices with provider routing, disk cache, and fallback.
     Returns (close_series, source_name).
     Never crashes — raises RuntimeError with all error details.
     """
+    # Check disk cache first
+    cached = _cache_load(ticker, start)
+    if cached is not None:
+        return cached, "cache"
+
     strategy = _provider_for_ticker(ticker, asset_type)
     errs: List[str] = []
 
     def _try_stooq() -> Optional[pd.Series]:
+        if _SKIP_STOOQ:
+            return None
         try:
             s = _with_retry(_stooq_download_raw, max_tries=max_tries)(ticker, market)
             return s if s is not None and not s.empty else None
@@ -302,24 +408,33 @@ def download_close(
             errs.append(f"yf({e})")
             return None
 
+    result: Optional[pd.Series] = None
+    source: str = ""
+
     if strategy == "stooq_first":
         s = _try_stooq()
         if s is not None:
-            return s, "stooq"
-        s = _try_yf()
-        if s is not None:
-            return s, "yfinance"
+            result, source = s, "stooq"
+        else:
+            s = _try_yf()
+            if s is not None:
+                result, source = s, "yfinance"
     elif strategy == "yf_only":
         s = _try_yf()
         if s is not None:
-            return s, "yfinance"
+            result, source = s, "yfinance"
     else:  # yf_first
         s = _try_yf()
         if s is not None:
-            return s, "yfinance"
-        s = _try_stooq()
-        if s is not None:
-            return s, "stooq"
+            result, source = s, "yfinance"
+        else:
+            s = _try_stooq()
+            if s is not None:
+                result, source = s, "stooq"
+
+    if result is not None:
+        _cache_save(ticker, start, result)
+        return result, source
 
     raise RuntimeError(f"all providers failed for {ticker}: {'; '.join(errs)}")
 
@@ -805,10 +920,17 @@ _SHARED_MACRO: Dict[str, pd.Series] = {}
 _SHARED_SPY: pd.Series = pd.Series(dtype=float)
 
 
-def _init_worker(macro_dict: Dict[str, pd.Series], spy_ret: pd.Series) -> None:
-    global _SHARED_MACRO, _SHARED_SPY
+def _init_worker(
+    macro_dict: Dict[str, pd.Series],
+    spy_ret: pd.Series,
+    cache_dir: Optional[Path],
+    skip_stooq: bool,
+) -> None:
+    global _SHARED_MACRO, _SHARED_SPY, _CACHE_DIR, _SKIP_STOOQ
     _SHARED_MACRO = macro_dict
     _SHARED_SPY   = spy_ret
+    _CACHE_DIR    = cache_dir
+    _SKIP_STOOQ   = skip_stooq
 
 
 # ---------------------------------------------------------------------------
@@ -967,6 +1089,12 @@ def main() -> None:
                          "Default: all.")
     ap.add_argument("--skip_macro",     action="store_true",
                     help="Skip FRED macro download (faster, useful for testing).")
+    ap.add_argument("--skip_stooq",     action="store_true",
+                    help="Skip stooq entirely (use when rate-limited).")
+    ap.add_argument("--max_retries",    type=int, default=3,
+                    help="Max provider retries per ticker (default 3).")
+    ap.add_argument("--cache_dir",      default="data/cache",
+                    help="Disk cache dir for downloaded price series (default data/cache).")
     ap.add_argument("--log_level",      default="INFO")
     ap.add_argument("--log_file",       default=None,
                     help="Optional log file path (in addition to stdout).")
@@ -985,7 +1113,8 @@ def main() -> None:
     log.info("BUILD DATASET V3")
     log.info("start_date=%s  lookback_days=%d  step=%dd  max_per_ticker=%d",
              start_date, args.lookback_days, args.step_days, args.max_per_ticker)
-    log.info("workers=%d  skip_macro=%s", args.workers, args.skip_macro)
+    log.info("workers=%d  skip_macro=%s  skip_stooq=%s  max_retries=%d  cache_dir=%s",
+             args.workers, args.skip_macro, args.skip_stooq, args.max_retries, args.cache_dir)
     log.info("=" * 60)
 
     # Load universe
@@ -1037,9 +1166,20 @@ def main() -> None:
         spy_ret = download_spy_returns(start=start_date)
         log.info("SPY: %d daily return points", len(spy_ret))
 
+    # Set globals for sequential mode and cache/stooq settings
+    global _CACHE_DIR, _SKIP_STOOQ
+    _CACHE_DIR  = Path(args.cache_dir) if args.cache_dir else None
+    _SKIP_STOOQ = args.skip_stooq
+    if _CACHE_DIR:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        log.info("Cache dir: %s", _CACHE_DIR)
+
     # Prepare output
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    failed_path = out_path.parent / "tickers_failed.txt"
+    failed_file = failed_path.open("w", encoding="utf-8")
 
     counts:       Dict[str, int] = {"ok": 0, "warn": 0, "block": 0}
     n_ok = n_fail = total_windows = 0
@@ -1052,6 +1192,8 @@ def main() -> None:
             if err:
                 n_fail += 1
                 log.warning("FAIL %-20s %s", ticker, err)
+                failed_file.write(f"{ticker}\t{err}\n")
+                failed_file.flush()
                 return
             n_ok += 1
             for ln in lines:
@@ -1066,7 +1208,7 @@ def main() -> None:
             with multiprocessing.Pool(
                 processes=workers,
                 initializer=_init_worker,
-                initargs=(macro, spy_ret),
+                initargs=(macro, spy_ret, _CACHE_DIR, _SKIP_STOOQ),
             ) as pool:
                 for result in pool.imap_unordered(process_ticker, tasks, chunksize=1):
                     _handle(*result)
@@ -1078,6 +1220,8 @@ def main() -> None:
                 _handle(*process_ticker(task))
                 if args.sleep_ticker > 0:
                     time.sleep(args.sleep_ticker)
+
+    failed_file.close()
 
     # Summary
     log.info("=" * 60)
