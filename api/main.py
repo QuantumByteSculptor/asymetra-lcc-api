@@ -39,6 +39,18 @@ logger = logging.getLogger(__name__)
 
 # Reuse your existing feature builder (from your ML LCC project)
 from features import DEFAULT_CONFIG, features_to_row, vector_columns  # type: ignore
+
+# Expert scoring layer (lazy-loaded per-asset bundles, graceful if dir missing)
+try:
+    from api.scoring import score_expert, list_loaded_experts, preload_experts as _preload_experts  # type: ignore
+    _EXPERTS_AVAILABLE = True
+except Exception as _scoring_import_err:
+    logger.warning("api/scoring.py not importable — expert scoring disabled: %s", _scoring_import_err)
+    _EXPERTS_AVAILABLE = False
+    def score_expert(*a, **kw): return None  # type: ignore
+    def list_loaded_experts(): return []  # type: ignore
+    def _preload_experts(): pass  # type: ignore
+
 from feature_utils import (  # type: ignore
     compute_dd_duration_recovery,
     compute_downside_dev,
@@ -1226,6 +1238,9 @@ def health() -> Dict[str, Any]:
         # ✅ observabilité bundle
         "unsup_bundle_path": unsup_path_abs,
         "unsup_bundle_exists": bool(unsup_exists),
+        # Expert scoring layer
+        "experts_loaded": list_loaded_experts(),
+        "experts_available": _EXPERTS_AVAILABLE,
     }
 
 
@@ -1282,6 +1297,17 @@ def score(req: ScoreRequest, x_api_key: Optional[str] = Header(default=None, ali
 
     if shadow_obj:
         resp["shadow"] = shadow_obj
+
+    # Expert scoring (additive — does not replace existing fields)
+    try:
+        asset_type = str(req.asset_type or "").strip().lower()
+        expert_result = score_expert(feats, asset_type)
+        resp["expert_decision"] = expert_result
+        resp["expert_loaded"] = expert_result is not None
+    except Exception as _e:
+        resp["expert_decision"] = None
+        resp["expert_loaded"] = False
+        resp["expert_decision_error"] = f"{type(_e).__name__}: {_e}"
 
     return jsonable_encoder(resp)
 
@@ -1568,6 +1594,17 @@ def score_oracle(
 
     if oracle_meta is not None:
         out["oracle_meta"] = oracle_meta
+
+    # Expert scoring (additive — does not replace existing fields)
+    try:
+        at = str(features_final.get("asset_type") or lovable_feats.get("asset_type") or "").strip().lower()
+        expert_result = score_expert(features_final, at)
+        out["expert_decision"] = expert_result
+        out["expert_loaded"] = expert_result is not None
+    except Exception as _e:
+        out["expert_decision"] = None
+        out["expert_loaded"] = False
+        out["expert_decision_error"] = f"{type(_e).__name__}: {_e}"
 
     return jsonable_encoder(out)
 
