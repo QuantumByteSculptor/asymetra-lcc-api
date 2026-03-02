@@ -1,0 +1,167 @@
+{
+  "generated_at": "2026-03-02T21:04:22.454071",
+  "input_file": "data/training/train_v3_all.jsonl",
+  "n_rows": 54824,
+  "n_tickers": 688,
+  "by_asset_type": {
+    "equity": 41644,
+    "etf": 10620,
+    "fx": 1040,
+    "commodity": 640,
+    "crypto": 560,
+    "rate": 320
+  },
+  "by_market": {
+    "US": 30238,
+    "GLOBAL": 12860,
+    "EU": 4720,
+    "EM": 2926,
+    "UK": 1440,
+    "JP": 1200,
+    "CA": 800,
+    "AU": 640
+  },
+  "label_distribution": {
+    "ok": 29927,
+    "warn": 12940,
+    "block": 11957
+  },
+  "label_pct": {
+    "block": 21.81,
+    "warn": 23.6,
+    "ok": 54.59
+  },
+  "target_non_ok_distribution": {
+    "1": 24897,
+    "0": 29927
+  },
+  "by_source": {
+    "yfinance": 32026,
+    "stooq": 22798
+  },
+  "temporal_checks": {
+    "n_ok": 54824,
+    "n_violation": 0,
+    "leakage_free": true,
+    "violations_sample": []
+  },
+  "duplicates": {
+    "n_duplicates": 0,
+    "sample": []
+  },
+  "nan_top30_features": {
+    "corr_spy": 100.0,
+    "beta_market": 100.0,
+    "abs_corr_mkt": 100.0,
+    "corr_vix": 71.11,
+    "recovery_days": 60.38,
+    "recovery_per_dd": 60.38,
+    "vix_pct_60d": 19.52,
+    "vol_regime": 19.52,
+    "vix_level": 19.06,
+    "rate_10y": 19.06,
+    "rate_2y": 19.06,
+    "term_spread": 19.06,
+    "credit_spread_hy": 19.06,
+    "hill_tail_index": 0.11,
+    "var99_var95": 0.09,
+    "es99_es95": 0.09,
+    "es95_var95": 0.09,
+    "vol_to_var95": 0.09,
+    "downside_dev": 0.05,
+    "semivariance": 0.05,
+    "vol20_vol60": 0.05,
+    "downside_div_vol": 0.05,
+    "worst_5d_vs_var99": 0.05,
+    "stress_multiplier": 0.04,
+    "es99_var99": 0.04,
+    "vol20_vol_ann": 0.04,
+    "vol60_vol_ann": 0.04,
+    "vol120_vol_ann": 0.04,
+    "dd_to_var99": 0.04,
+    "vol_of_vol": 0.01
+  },
+  "nan_macro_features": {
+    "rate_2y": 19.06,
+    "credit_spread_ig": 0.0,
+    "term_spread": 19.06,
+    "recovery_per_dd": 60.38,
+    "vix_level": 19.06,
+    "corr_vix": 71.11,
+    "recovery_days": 60.38,
+    "vol_regime": 19.52,
+    "beta_market": 100.0,
+    "vix_pct_60d": 19.52,
+    "corr_spy": 100.0,
+    "rate_10y": 19.06,
+    "credit_spread_hy": 19.06,
+    "abs_corr_mkt": 100.0
+  },
+  "non_macro_high_nan": {},
+  "forward_return_stats": {
+    "forward_return_5d": {
+      "n": 54824,
+      "nan_count": 0,
+      "mean": 0.00272,
+      "std": 0.06942,
+      "min": -1.325,
+      "p5": -0.0869,
+      "p25": -0.02354,
+      "p50": 0.00125,
+      "p75": 0.02617,
+      "p95": 0.09252,
+      "max": 4.0,
+      "outliers_below_minus50pct": 9,
+      "outliers_above_100pct": 11
+    },
+    "forward_return_10d": {
+      "n": 54824,
+      "nan_count": 0,
+      "mean": 0.00714,
+      "std": 0.11744,
+      "min": -2.5,
+      "p5": -0.12177,
+      "p25": -0.03162,
+      "p50": 0.00365,
+      "p75": 0.04054,
+      "p95": 0.13664,
+      "max": 9.0,
+      "outliers_below_minus50pct": 40,
+      "outliers_above_100pct": 32
+    },
+    "forward_return_20d": {
+      "n": 54824,
+      "nan_count": 0,
+      "mean": 0.01538,
+      "std": 0.17641,
+      "min": -3.45,
+      "p5": -0.16234,
+      "p25": -0.04216,
+      "p50": 0.00788,
+      "p75": 0.06094,
+      "p95": 0.19946,
+      "max": 19.0,
+      "outliers_below_minus50pct": 123,
+      "outliers_above_100pct": 79
+    },
+    "forward_return_60d": {
+      "n": 54824,
+      "nan_count": 0,
+      "mean": 0.04653,
+      "std": 0.42401,
+      "min": -5.125,
+      "p5": -0.26781,
+      "p25": -0.06653,
+      "p50": 0.02231,
+      "p75": 0.12037,
+      "p95": 0.38522,
+      "max": 49.0,
+      "outliers_below_minus50pct": 451,
+      "outliers_above_100pct": 377
+    }
+  },
+  "verdict": {
+    "ok": true,
+    "issues": []
+  }
+}
