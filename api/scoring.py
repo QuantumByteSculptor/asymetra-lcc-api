@@ -5,16 +5,22 @@ Expert model loading and scoring layer.
 Provides lazy-loaded per-asset-type expert bundles (IF+LOF unsup + XGB sup_bin).
 Falls back to global_bundle.joblib if no expert exists for the given asset_type.
 
+Feature flag: EXPERTS_ENABLED env var (default "0" = OFF).
+When disabled, score_expert() returns None and no bundles are loaded.
+
 Public API:
+    is_experts_enabled()            -> bool
     score_expert(feats, asset_type) -> Optional[Dict]
     list_loaded_experts()           -> List[str]
     preload_experts()               -> None  (optional warm-up)
+    experts_health()                -> Dict   (structured status for /health)
 """
 from __future__ import annotations
 
 import logging
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +35,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from features import DEFAULT_CONFIG, features_to_row  # type: ignore
+
+# ---------------------------------------------------------------------------
+# Feature flag: EXPERTS_ENABLED (default OFF)
+# ---------------------------------------------------------------------------
+def is_experts_enabled() -> bool:
+    """Return True only if EXPERTS_ENABLED env var is explicitly '1'."""
+    return os.getenv("EXPERTS_ENABLED", "0").strip() == "1"
 
 # ---------------------------------------------------------------------------
 # Module-level expert cache (lazy, populated on first use)
@@ -57,7 +70,11 @@ def load_expert_bundle(asset_type: str) -> Optional[Dict[str, Any]]:
     """
     Return the expert bundle for asset_type (with cache).
     Falls back to global_bundle.  Returns None if nothing is available.
+    Returns None immediately if EXPERTS_ENABLED != 1.
     """
+    if not is_experts_enabled():
+        return None
+
     at = (asset_type or "").strip().lower()
 
     if at in _EXPERT_CACHE:
@@ -90,7 +107,10 @@ def list_loaded_experts() -> List[str]:
 
 
 def preload_experts() -> None:
-    """Eagerly load all bundles found in EXPERTS_DIR."""
+    """Eagerly load all bundles found in EXPERTS_DIR. No-op if disabled."""
+    if not is_experts_enabled():
+        logger.info("scoring: EXPERTS_ENABLED=0, skipping preload")
+        return
     experts_dir = Path(_EXPERTS_DIR)
     if not experts_dir.is_dir():
         logger.info("scoring: experts dir not found (%s), skipping preload", experts_dir)
@@ -247,3 +267,53 @@ def score_expert(
         result["expert_status"] = result.get("unsup_status", "ok")
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Health / observability
+# ---------------------------------------------------------------------------
+
+def experts_health() -> Dict[str, Any]:
+    """
+    Structured status dict for /health endpoint.
+
+    Always returns a stable shape regardless of enabled/disabled state.
+    """
+    enabled = is_experts_enabled()
+    experts_dir = Path(_EXPERTS_DIR)
+    bundle_paths: Dict[str, str] = {}
+    bundle_exists: Dict[str, bool] = {}
+
+    # Scan for bundle files on disk (even if disabled — useful for ops)
+    if experts_dir.is_dir():
+        for p in sorted(experts_dir.glob("*_bundle.joblib")):
+            at = p.stem.replace("_bundle", "")
+            bundle_paths[at] = str(p)
+            bundle_exists[at] = True
+
+    loaded = list_loaded_experts() if enabled else []
+
+    # Per-bundle detail
+    bundles_detail: Dict[str, Dict[str, Any]] = {}
+    for at, path_str in bundle_paths.items():
+        detail: Dict[str, Any] = {"path": path_str, "exists": True, "loaded": at in loaded}
+        if at in _EXPERT_CACHE and _EXPERT_CACHE[at] is not None:
+            b = _EXPERT_CACHE[at]
+            detail["n_cols"] = len(b.get("cols", []))
+            detail["feature_version"] = b.get("feature_version", "unknown")
+            detail["has_unsup"] = "unsup" in b and b["unsup"] is not None
+            detail["has_sup_bin"] = "sup_bin" in b and b["sup_bin"] is not None
+            sup = b.get("sup_bin", {})
+            detail["thresholds_loaded"] = bool(sup.get("thresholds"))
+            detail["n_train"] = b.get("meta", {}).get("n_train", None)
+        bundles_detail[at] = detail
+
+    return {
+        "enabled": enabled,
+        "experts_dir": str(experts_dir),
+        "bundles_on_disk": list(bundle_paths.keys()),
+        "bundles_loaded": loaded,
+        "n_bundles_on_disk": len(bundle_paths),
+        "n_bundles_loaded": len(loaded),
+        "bundles": bundles_detail,
+    }
