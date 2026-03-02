@@ -124,15 +124,10 @@ def download_macro_data(start: str = "2017-01-01") -> Dict[str, pd.Series]:
 def download_spy_returns(start: str = "2017-01-01") -> pd.Series:
     """Download SPY daily returns for cross-asset features."""
     try:
-        import yfinance as yf
-        df = yf.download("SPY", start=start, interval="1d",
-                         auto_adjust=True, progress=False, threads=False)
-        if df is not None and not df.empty:
-            close = df["Close"]
-            if isinstance(close, pd.DataFrame):
-                close = close.iloc[:, 0]
-            ret = close.pct_change().dropna()
-            return ret
+        # Use direct Yahoo API (yfinance 0.2.40 is broken for most tickers)
+        s = _yahoo_direct_download("SPY", start)
+        ret = s.pct_change().dropna()
+        return ret
     except Exception as e:
         log.warning("SPY download failed: %s", e)
     return pd.Series(dtype=float)
