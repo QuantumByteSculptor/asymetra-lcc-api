@@ -69,6 +69,8 @@ models/v3/
 # =========================
 test_api.sh
 *.sh
+# ✅ Release gate (committed — not a local helper)
+!scripts/ml/validation/check_v3_release.sh
 
 # =========================
 # Release archives
