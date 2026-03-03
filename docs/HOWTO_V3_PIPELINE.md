@@ -188,13 +188,16 @@ INFO     Features after NaN filter: 50 / 63 kept
 ```
 Features restantes → imputées par médiane (SimpleImputer dans sklearn Pipeline).
 
-### Résultats v3 (run complet, 4 folds)
+### Résultats v3 (run complet, 5 folds — dataset rebuild avec corr_spy/beta_market)
 
 | Modèle | ROC-AUC | PR-AUC | Brier |
 |--------|---------|--------|-------|
-| LR (mean ± std) | 0.762 ± 0.049 | 0.708 | 0.204 |
-| XGB (mean ± std) | 0.742 ± 0.047 | 0.682 | 0.220 |
-| **XGB calibré (final)** | **0.782** | **0.750** | **0.189** |
+| LR (mean ± std) | 0.720 ± 0.118 | 0.660 | 0.231 |
+| XGB (mean ± std) | 0.725 ± 0.047 | 0.648 | 0.256 |
+| **XGB calibré (final)** | **0.787** | **0.769** | **0.187** |
+
+> **Note :** Après rebuild du dataset (fix timezone SPY), `corr_spy`/`beta_market`/`corr_vix` sont
+> désormais peuplés — 64 features retenues (vs 50 avant, 0 dropped). Thresholds : `t_lo=0.5203`, `t_hi=0.6667`.
 
 ### Artifacts (`models/v3/`)
 
@@ -202,8 +205,8 @@ Features restantes → imputées par médiane (SimpleImputer dans sklearn Pipeli
 v3_lr_model.joblib        — LR pipeline (SimpleImputer + StandardScaler + LR)
 v3_xgb_model.joblib       — XGBoost pipeline (SimpleImputer + XGBClassifier)
 v3_calibrator.joblib      — IsotonicRegression calibrateur (last-fold val)
-v3_feature_names.joblib   — Liste ordonnée features (50 après NaN filter)
-v3_thresholds.json        — t_lo (warn) / t_hi (block) — FPR-based
+v3_feature_names.joblib   — Liste ordonnée features (64 features, 0 dropped)
+v3_thresholds.json        — t_lo=0.5203 (warn) / t_hi=0.6667 (block) — FPR-based
 v3_meta.json              — Consolidated: feature_cols, medians, dropped_features,
                             thresholds, schema_version (NEW canonical meta)
 v3_metrics.json           — Métriques fold + agrégées (backward-compat)
@@ -356,14 +359,15 @@ py -m pytest -v
 
 **✅ PIPELINE V3 PRÊT**
 
-Tous les composants sont opérationnels et testés sur le dataset réel (54,824 records, 688 tickers) :
+Tous les composants sont opérationnels et testés sur le dataset réel (54,963 records, 689 tickers) :
 
 - [x] QA : 0 violations temporelles, 0 doublons
-- [x] Split : 4 folds valides, leakage-free
-- [x] Training : XGB calibré ROC-AUC=0.782, LR=0.762
+- [x] Split : 5 folds valides, leakage-free (après rebuild dataset)
+- [x] Training : XGB calibré ROC-AUC=0.787, LR=0.720 — 64 features (0 dropped)
 - [x] Backtest : Sharpe signal=0.90 vs benchmark=0.31 ✅
 - [x] Drift : monitoring opérationnel (détecte régime COVID)
-- [x] Tests : 26/26 passés
+- [x] Tests : 66/66 passés
+- [x] corr_spy / beta_market / corr_vix : fix timezone SPY appliqué, features peuplées
 
 **TODO list pour la suite :**
 1. Collecter un export prod réel pour le drift monitoring en production

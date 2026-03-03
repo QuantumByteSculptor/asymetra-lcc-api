@@ -46,9 +46,9 @@ assert meta["schema_version"] == "3.1", (
     f"got {meta['schema_version']!r}"
 )
 
-FEATURE_COLS = meta["feature_cols"]   # ordered list of 50 feature names
-T_LO         = thresholds["t_lo"]    # 0.4863 — warn threshold
-T_HI         = thresholds["t_hi"]    # 0.6654 — block threshold
+FEATURE_COLS = meta["feature_cols"]   # ordered list of 64 feature names
+T_LO         = thresholds["t_lo"]    # 0.5203 — warn threshold
+T_HI         = thresholds["t_hi"]    # 0.6667 — block threshold
 ```
 
 ---
@@ -92,21 +92,17 @@ def score_v3(input_features: dict[str, float]) -> dict:
 ## 4. Known Pitfalls
 
 ### Feature order — always use `feature_cols` from `v3_meta.json`
-**NEVER hardcode the feature list.** The 50 retained features are determined
+**NEVER hardcode the feature list.** The retained features are determined
 dynamically by a NaN-rate filter applied at training time. Use:
 ```python
 FEATURE_COLS = meta["feature_cols"]
 ```
 
-### 13 dropped features — silently ignored at inference
-The following features were dropped because >30% of training rows were NaN:
-```
-abs_corr_mkt, beta_market, corr_spy, corr_vix, credit_spread_hy,
-rate_10y, rate_2y, recovery_days, recovery_per_dd, term_spread,
-vix_level, vix_pct_60d, vol_regime
-```
-If any of these appear in `input_features`, ignore them — they are **not** in
-`FEATURE_COLS` and will be silently skipped by the dict lookup above.
+### Dropped features (current model: 0 dropped, 64 kept)
+After the dataset rebuild (SPY timezone fix), all cross-asset features are populated.
+The current model has **0 dropped features** — all 64 features are in `FEATURE_COLS`.
+`dropped_features` in `v3_meta.json` will be an empty list `[]`.
+If you pass features not in `FEATURE_COLS`, they are silently skipped by the dict lookup.
 
 ### SimpleImputer is INSIDE the XGB pipeline — do NOT pre-impute
 The `v3_xgb_model.joblib` pipeline includes `SimpleImputer(strategy="median")`.

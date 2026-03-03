@@ -8,10 +8,10 @@
 ## Changelog
 
 1. **Full v3 pipeline**: build → QA → split → train → backtest → drift monitoring
-2. **Dynamic NaN filter** (30% threshold): 13/63 features dropped, 50 retained
-3. **XGB calibrated** (IsotonicRegression): ROC-AUC=0.783, Brier=0.188
-4. **Thresholds FPR-based**: `t_lo=0.4863` (warn, FPR≤10%), `t_hi=0.6654` (block, FPR≤25%)
-5. **Backtest**: signal Sharpe=0.87 vs benchmark 0.31 (+5bps cost)
+2. **Dataset rebuild**: corr_spy/beta_market/corr_vix timezone fix — 0 features dropped (64 kept, vs 50 before)
+3. **XGB calibrated** (IsotonicRegression): ROC-AUC=0.787, Brier=0.187, ECE=0.000
+4. **Thresholds FPR-based**: `t_lo=0.5203` (warn, FPR≤10%), `t_hi=0.6667` (block, FPR≤25%)
+5. **Backtest**: signal Sharpe=0.90 vs benchmark 0.31 (+5bps cost)
 
 ---
 
