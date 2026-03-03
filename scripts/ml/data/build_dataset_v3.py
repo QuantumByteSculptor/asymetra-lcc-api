@@ -1188,9 +1188,9 @@ def main() -> None:
     )
     ap.add_argument("--universe",       default="data/universe.json")
     ap.add_argument("--out",            default="data/training/train_v3_all.jsonl")
-    ap.add_argument("--start",          default=None,
-                    help="Override start date (YYYY-MM-DD). Default: lookback_years ago.")
-    ap.add_argument("--lookback_years", type=int, default=7)
+    ap.add_argument("--start",          default="2010-01-01",
+                    help="Dataset start date (YYYY-MM-DD). Default: 2010-01-01.")
+    ap.add_argument("--lookback_years", type=int, default=16)
     ap.add_argument("--end",            default=None)
     ap.add_argument("--lookback_days",  type=int, default=_LOOKBACK_DAYS)
     ap.add_argument("--step_days",      type=int, default=_STEP_DAYS)
@@ -1272,6 +1272,7 @@ def main() -> None:
         log.info("Skipping macro data (--skip_macro flag set)")
         macro: Dict[str, pd.Series] = {}
         spy_ret = pd.Series(dtype=float)
+        market_proxy = "NONE"
     else:
         log.info("Downloading macro data from FRED...")
         macro = download_macro_data(start=start_date)

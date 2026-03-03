@@ -50,12 +50,14 @@ Collecte les prix depuis Yahoo/Stooq + macro FRED, calcule features + labels mul
 py scripts/ml/data/build_dataset_v3.py \
     --universe data/universe.json \
     --out      data/training/train_v3_all.jsonl \
+    --start    2010-01-01 \
     --workers  4
 
 # Smoke test rapide (~5 tickers)
 py scripts/ml/data/build_dataset_v3.py \
     --universe data/smoke_universe.json \
     --out      data/training/smoke_v3.jsonl \
+    --start    2010-01-01 \
     --workers  2
 ```
 
@@ -324,5 +326,5 @@ Tous les composants sont opérationnels et testés sur le dataset réel (54,824 
 1. Collecter un export prod réel pour le drift monitoring en production
 2. Fine-tuner `t_lo`/`t_hi` selon la politique de risque (actuellement FPR-based)
 3. Intégrer le scoring v3 dans l'API (endpoint `/score_oracle_v3`) — hors scope Agent 3
-4. Re-splitter avec `--folds 5 --min_train 50` une fois le dataset >= 5000 records sur fenêtre courte
-5. Feature engineering : `corr_spy`/`beta_market` actuellement null → nécessite SPY data dans build_dataset_v3
+4. Reconstruire le dataset avec `--start 2010-01-01` (défaut désormais) pour obtenir 5 folds complets
+5. `corr_spy`/`beta_market` seront peuplés au prochain rebuild (fix timestamps SPY appliqué — commit 3f73258)

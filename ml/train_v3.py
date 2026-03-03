@@ -63,8 +63,12 @@ log = logging.getLogger("train_v3")
 # Feature columns (numeric only, excludes meta and always-null)
 # ---------------------------------------------------------------------------
 
+# NOTE: corr_spy / beta_market / abs_corr_mkt are all-null in the *current* fold files
+# (SPY download failed during the original build).  After rebuilding with the fixed
+# download_spy_returns() in build_dataset_v3.py, remove these from _ALWAYS_NULL so
+# the training pipeline picks them up automatically.
 _ALWAYS_NULL = {"corr_spy", "beta_market", "abs_corr_mkt"}
-_META_COLS   = {"asset_type", "market", "ticker"}
+_META_COLS   = {"asset_type", "market", "ticker", "market_proxy"}   # string fields → excluded from X
 
 # Ordered feature list (determined at first fold, reused across all folds)
 _FEAT_COLS: List[str] = []
@@ -75,6 +79,11 @@ _MACRO_FEATS = {
     "credit_spread_hy", "credit_spread_ig", "vol_regime",
     "corr_vix",
 }
+
+# Recovery / drawdown features use sentinel -1.0 when undefined (price didn't recover).
+# dd_duration also uses -1 sentinel.  These are NOT imputed — -1 is a valid signal value.
+# recovery_defined (0/1 flag) is always numeric, never NaN.
+_SENTINEL_FEATS = {"recovery_days", "recovery_per_dd", "dd_duration", "recovery_defined"}
 
 
 # ---------------------------------------------------------------------------
