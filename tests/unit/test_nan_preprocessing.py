@@ -126,9 +126,7 @@ def _write_and_load(records: list) -> tuple:
     if str(repo) not in sys.path:
         sys.path.insert(0, str(repo))
 
-    # Reset the global _FEAT_COLS so each test starts fresh
     import scripts.ml.train.train_v3 as tv3
-    tv3._FEAT_COLS = []
 
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
@@ -137,9 +135,11 @@ def _write_and_load(records: list) -> tuple:
             f.write(json.dumps(rec) + "\n")
         tmp = Path(f.name)
 
-    X, y, feat_names = tv3.load_jsonl_fold(tmp)
+    # Derive feat_cols from first record (mirrors train() step 1)
+    feat_cols = tv3._candidate_feat_cols(records[0].get("features", {}))
+    X, y = tv3.load_jsonl_fold(tmp, feat_cols)
     tmp.unlink()
-    return X, y, feat_names
+    return X, y, feat_cols
 
 
 # ---------------------------------------------------------------------------

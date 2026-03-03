@@ -136,45 +136,88 @@ data/training/v3/
 
 ---
 
-## 4. Training v3
+## 4. Training v3 ← ENTRYPOINT UNIQUE
 
-Entraîne LR + XGBoost sur les folds CV, calibre, et sauve les artifacts versionnés.
+`scripts/ml/train/train_v3.py` est le **seul entrypoint officiel** pour l'entraînement v3.
+Il lit le manifest produit par `split_v3_time.py` — reproductible et manifest-based.
+
+### Commande complète (dataset réel, 54 824 records)
 
 ```bash
+# Full run (LR + XGB, ~5-10 min)
 py scripts/ml/train/train_v3.py \
     --manifest data/training/v3/splits_manifest.json \
     --out_dir  models/v3
 
-# Sans LR (XGB uniquement, plus rapide)
+# XGB uniquement (plus rapide)
 py scripts/ml/train/train_v3.py \
     --manifest data/training/v3/splits_manifest.json \
-    --out_dir  models/v3 \
-    --no_lr
+    --out_dir  models/v3 --no_lr
 ```
 
-**Résultats v3 (dataset réel, 4 folds valides) :**
+### Smoke run (dev / CI rapide)
+
+```bash
+py scripts/ml/train/train_v3.py \
+    --manifest data/training/v3/splits_manifest.json \
+    --out_dir  /tmp/v3_smoke \
+    --max_rows 2000 --no_lr --n_estimators 50
+```
+
+### Options
+
+| Option | Défaut | Description |
+|--------|--------|-------------|
+| `--max_rows N` | (tout) | Limite N lignes par fold (smoke) |
+| `--nan_drop_threshold 0.30` | 0.30 | Drop features avec >30% NaN |
+| `--n_estimators 400` | 400 | XGBoost n_estimators |
+| `--no_lr` | false | Skip LR baseline |
+| `--seed 42` | 42 | Reproductibilité |
+
+### NaN handling (automatique, loggé)
+
+Au démarrage, le script détecte les NaN sur le premier fold et droppe dynamiquement :
+```
+WARNING  NaN filter (threshold=30%): dropping 13/63 features:
+  DROPPED abs_corr_mkt      100.0% NaN   ← SPY data manquante
+  DROPPED corr_spy           100.0% NaN
+  DROPPED vix_level          100.0% NaN  ← macro FRED manquante
+  DROPPED recovery_days       57.8% NaN
+  ...
+INFO     Features after NaN filter: 50 / 63 kept
+```
+Features restantes → imputées par médiane (SimpleImputer dans sklearn Pipeline).
+
+### Résultats v3 (run complet, 4 folds)
+
 | Modèle | ROC-AUC | PR-AUC | Brier |
 |--------|---------|--------|-------|
-| LR (mean) | 0.762 ± 0.049 | 0.708 | 0.204 |
-| XGB (mean) | 0.742 ± 0.047 | 0.682 | 0.220 |
-| XGB calibré (final) | **0.782** | **0.750** | **0.189** |
+| LR (mean ± std) | 0.762 ± 0.049 | 0.708 | 0.204 |
+| XGB (mean ± std) | 0.742 ± 0.047 | 0.682 | 0.220 |
+| **XGB calibré (final)** | **0.782** | **0.750** | **0.189** |
 
-**Top-5 features (importance XGB) :**
-1. `vix_pct_60d` (21%) — régime VIX dominant
-2. `vol20_vol60` (8%) — rupture de vol court/long terme
-3. `var99_var95` (3.5%) — ratio queues de distribution
-4. `stress_multiplier` (2.8%)
-5. `log_n_used` (2.2%)
+### Artifacts (`models/v3/`)
 
-**Artifacts sauvés dans `models/v3/` :**
 ```
-v3_lr_model.joblib         — LR pipeline (imputer + scaler + clf)
-v3_xgb_model.joblib        — XGBoost pipeline
-v3_calibrator.joblib       — IsotonicRegression calibrateur
-v3_feature_names.joblib    — Liste des 60 features dans l'ordre
-v3_thresholds.json         — t_lo (warn) / t_hi (block)
-v3_metrics.json            — Métriques par fold + agrégées
+v3_lr_model.joblib        — LR pipeline (SimpleImputer + StandardScaler + LR)
+v3_xgb_model.joblib       — XGBoost pipeline (SimpleImputer + XGBClassifier)
+v3_calibrator.joblib      — IsotonicRegression calibrateur (last-fold val)
+v3_feature_names.joblib   — Liste ordonnée features (50 après NaN filter)
+v3_thresholds.json        — t_lo (warn) / t_hi (block) — FPR-based
+v3_meta.json              — Consolidated: feature_cols, medians, dropped_features,
+                            thresholds, schema_version (NEW canonical meta)
+v3_metrics.json           — Métriques fold + agrégées (backward-compat)
 ```
+
+### Outputs métriques
+
+```
+data/metrics/train_v3_report.json   ← chemin canonique (= v3_metrics.json)
+models/v3/v3_metrics.json           ← backward-compat
+```
+
+> **Note :** `scripts/ml/train/train_experts_v3.py` est **déprécié**.
+> Ne pas utiliser — il n'est plus maintenu.
 
 ---
 
