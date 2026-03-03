@@ -488,19 +488,121 @@ def download_macro_data(start: str) -> Dict[str, pd.Series]:
     return macro
 
 
-def download_spy_returns(start: str) -> pd.Series:
-    try:
-        import yfinance as yf
-        df = yf.download("SPY", start=start, interval="1d",
-                         auto_adjust=True, progress=False, threads=False)
-        if df is not None and not df.empty:
-            close = df["Close"]
-            if isinstance(close, pd.DataFrame):
-                close = close.iloc[:, 0]
-            return pd.Series(close).pct_change().dropna()
-    except Exception as e:
-        log.warning("SPY download failed: %s", e)
-    return pd.Series(dtype=float)
+def download_spy_returns(start: str, cache_dir: Optional[Path] = None) -> Tuple[pd.Series, str]:
+    """
+    Download SPY (or proxy) daily returns with multi-provider fallback.
+
+    Cascade:
+      1. Cache hit  (data/cache/spy_returns_<start>.parquet)
+      2. Stooq      spy.us
+      3. Yahoo v8   SPY
+      4. Stooq      ^spx  (S&P 500 index)
+      5. Yahoo v8   ^GSPC
+
+    Returns (series, proxy_name) where proxy_name ∈ {SPY, ^GSPC, NONE}.
+    Records are cached locally after a successful download.
+    """
+    # ── 1. Cache hit ──────────────────────────────────────────────────────────
+    cache_path: Optional[Path] = None
+    if cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"spy_returns_{start.replace('-', '')}.parquet"
+        if cache_path.exists():
+            try:
+                df_c = pd.read_parquet(cache_path)
+                s = df_c["ret"]
+                log.info("SPY cache hit: %d points from %s", len(s), cache_path.name)
+                proxy = df_c.attrs.get("proxy", "SPY") if hasattr(df_c, "attrs") else "SPY"
+                return s, proxy
+            except Exception as e:
+                log.warning("SPY cache read failed: %s", e)
+
+    def _try(name: str, fn) -> Optional[pd.Series]:
+        try:
+            s = fn()
+            if s is not None and not s.empty:
+                log.info("SPY source OK: %s  (%d pts)", name, len(s))
+                return s
+        except Exception as ex:
+            log.warning("SPY source FAIL %s: %s", name, ex)
+        return None
+
+    # ── 2. Stooq spy.us ───────────────────────────────────────────────────────
+    def _stooq_spy():
+        url = f"https://stooq.com/q/d/l/?s=spy.us&i=d"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
+        r.raise_for_status()
+        first = r.text[:80]
+        if "Date" not in first:
+            raise RuntimeError(f"stooq spy.us bad header: {first}")
+        df = pd.read_csv(io.StringIO(r.text), parse_dates=["Date"], index_col="Date")
+        if "Close" not in df.columns:
+            raise RuntimeError("stooq spy.us missing Close column")
+        s = df["Close"].dropna()
+        if s.empty:
+            raise RuntimeError("stooq spy.us empty")
+        return s.pct_change().dropna()
+
+    # ── 3. Yahoo v8 SPY ───────────────────────────────────────────────────────
+    def _yahoo_spy():
+        s = _yahoo_direct_download("SPY", start)
+        return s.pct_change().dropna()
+
+    # ── 4. Stooq ^spx ─────────────────────────────────────────────────────────
+    def _stooq_spx():
+        url = "https://stooq.com/q/d/l/?s=%5espx&i=d"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
+        r.raise_for_status()
+        first = r.text[:80]
+        if "Date" not in first:
+            raise RuntimeError(f"stooq ^spx bad header: {first}")
+        df = pd.read_csv(io.StringIO(r.text), parse_dates=["Date"], index_col="Date")
+        if "Close" not in df.columns:
+            raise RuntimeError("stooq ^spx missing Close column")
+        s = df["Close"].dropna()
+        if s.empty:
+            raise RuntimeError("stooq ^spx empty")
+        return s.pct_change().dropna()
+
+    # ── 5. Yahoo v8 ^GSPC ────────────────────────────────────────────────────
+    def _yahoo_gspc():
+        s = _yahoo_direct_download("%5EGSPC", start)
+        return s.pct_change().dropna()
+
+    candidates = [
+        ("SPY",   _stooq_spy),
+        ("SPY",   _yahoo_spy),
+        ("^GSPC", _stooq_spx),
+        ("^GSPC", _yahoo_gspc),
+    ]
+
+    for proxy_name, fn in candidates:
+        s = _try(proxy_name, fn)
+        if s is not None and len(s) >= 100:
+            # Normalize index to date-only (midnight) so it aligns with ticker close indexes.
+            # Yahoo v8 returns intraday timestamps (e.g., 14:30 UTC) that won't intersect
+            # with date-only stooq/yfinance close indexes.
+            if s.index.dtype != "datetime64[ns]" or s.index[0].hour != 0:
+                s = s.copy()
+                s.index = pd.DatetimeIndex(s.index.normalize())
+            # Deduplicate after normalization (shouldn't happen but guard)
+            s = s[~s.index.duplicated(keep="last")]
+            # filter to [start, today]
+            s = s[s.index >= pd.Timestamp(start)]
+            if len(s) >= 50:
+                # ── Save to cache ──────────────────────────────────────────────
+                if cache_path is not None:
+                    try:
+                        df_save = pd.DataFrame({"ret": s})
+                        df_save.attrs["proxy"] = proxy_name
+                        df_save.to_parquet(cache_path)
+                        log.info("SPY cached → %s", cache_path.name)
+                    except Exception as e:
+                        log.warning("SPY cache write failed: %s", e)
+                return s, proxy_name
+
+    log.warning("All SPY sources failed — cross-asset features will be NaN")
+    return pd.Series(dtype=float), "NONE"
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +733,7 @@ def build_features_v3(
     macro: Dict[str, pd.Series],
     spy_returns: pd.Series,
     window_end_date: pd.Timestamp,
+    market_proxy: str = "NONE",
 ) -> Dict[str, Any]:
     """
     Build v3 feature vector from a single backward-looking window.
@@ -813,8 +916,12 @@ def build_features_v3(
         "autocorr_5": _safe(autocorr_5),
 
         # Drawdown dynamics
-        "dd_duration":   dd_dur  if dd_dur  > 0 else None,
-        "recovery_days": rec     if rec     > 0 else None,
+        # recovery_defined=1 means the drawdown recovered within the observation window.
+        # When undefined (price didn't recover), sentinel value -1 is used so the model
+        # can learn from the absence of recovery — no information leakage, no NaN.
+        "dd_duration":      float(dd_dur) if dd_dur and dd_dur > 0 else -1.0,
+        "recovery_defined": 1.0 if rec and rec > 0 else 0.0,
+        "recovery_days":    float(rec)    if rec and rec > 0    else -1.0,
 
         # Stress
         "stress_var99":        _safe(stress.get("stress_var99")),
@@ -825,10 +932,11 @@ def build_features_v3(
         "hill_tail_index": _safe(hill_est),
 
         # Cross-asset (v3 new)
-        "corr_spy":   _safe(corr_spy),
-        "corr_vix":   _safe(corr_vix),
-        "beta_market": _safe(beta_mkt),
+        "corr_spy":     _safe(corr_spy),
+        "corr_vix":     _safe(corr_vix),
+        "beta_market":  _safe(beta_mkt),
         "abs_corr_mkt": _safe(abs(corr_spy) if corr_spy is not None else None),
+        "market_proxy": market_proxy,   # string metadata: "SPY" | "^GSPC" | "NONE"
 
         # Macro (v3 new)
         "vix_level":         _safe(vix_level),
@@ -854,7 +962,8 @@ def build_features_v3(
         "downside_div_vol":   _safe(_ratio(downside_dev, vol_ann)),
         "worst_5d_vs_var99":  _safe(_ratio(abs(worst_5d) if worst_5d else None, var99)),
         "dd_duration_per_n":  _safe(_ratio(dd_dur, n_used) if dd_dur else None),
-        "recovery_per_dd":    _safe(_ratio(rec, dd_dur) if rec and dd_dur else None),
+        # sentinel -1 when recovery is undefined (consistent with recovery_days)
+        "recovery_per_dd":    _safe(_ratio(rec, dd_dur)) if rec and dd_dur else -1.0,
     }
 
     return feats
@@ -918,6 +1027,7 @@ def compute_labels_v3(
 # ---------------------------------------------------------------------------
 _SHARED_MACRO: Dict[str, pd.Series] = {}
 _SHARED_SPY: pd.Series = pd.Series(dtype=float)
+_SHARED_MARKET_PROXY: str = "NONE"
 
 
 def _init_worker(
@@ -925,12 +1035,14 @@ def _init_worker(
     spy_ret: pd.Series,
     cache_dir: Optional[Path],
     skip_stooq: bool,
+    market_proxy: str = "NONE",
 ) -> None:
-    global _SHARED_MACRO, _SHARED_SPY, _CACHE_DIR, _SKIP_STOOQ
-    _SHARED_MACRO = macro_dict
-    _SHARED_SPY   = spy_ret
-    _CACHE_DIR    = cache_dir
-    _SKIP_STOOQ   = skip_stooq
+    global _SHARED_MACRO, _SHARED_SPY, _CACHE_DIR, _SKIP_STOOQ, _SHARED_MARKET_PROXY
+    _SHARED_MACRO         = macro_dict
+    _SHARED_SPY           = spy_ret
+    _CACHE_DIR            = cache_dir
+    _SKIP_STOOQ           = skip_stooq
+    _SHARED_MARKET_PROXY  = market_proxy
 
 
 # ---------------------------------------------------------------------------
@@ -1015,6 +1127,7 @@ def process_ticker(task: Dict[str, Any]) -> Tuple[List[str], str, Optional[str]]
                 macro=_SHARED_MACRO,
                 spy_returns=_SHARED_SPY,
                 window_end_date=px_past.index[-1],
+                market_proxy=_SHARED_MARKET_PROXY,
             )
             if not feats:
                 continue
@@ -1162,9 +1275,10 @@ def main() -> None:
     else:
         log.info("Downloading macro data from FRED...")
         macro = download_macro_data(start=start_date)
-        log.info("Downloading SPY returns...")
-        spy_ret = download_spy_returns(start=start_date)
-        log.info("SPY: %d daily return points", len(spy_ret))
+        log.info("Downloading SPY/market returns (with stooq/yahoo fallback)...")
+        _cache = Path(args.cache_dir) if args.cache_dir else Path("data/cache")
+        spy_ret, market_proxy = download_spy_returns(start=start_date, cache_dir=_cache)
+        log.info("SPY: %d daily return points  proxy=%s", len(spy_ret), market_proxy)
 
     # Set globals for sequential mode and cache/stooq settings
     global _CACHE_DIR, _SKIP_STOOQ
@@ -1208,14 +1322,15 @@ def main() -> None:
             with multiprocessing.Pool(
                 processes=workers,
                 initializer=_init_worker,
-                initargs=(macro, spy_ret, _CACHE_DIR, _SKIP_STOOQ),
+                initargs=(macro, spy_ret, _CACHE_DIR, _SKIP_STOOQ, market_proxy),
             ) as pool:
                 for result in pool.imap_unordered(process_ticker, tasks, chunksize=1):
                     _handle(*result)
         else:
-            global _SHARED_MACRO, _SHARED_SPY
-            _SHARED_MACRO = macro
-            _SHARED_SPY   = spy_ret
+            global _SHARED_MACRO, _SHARED_SPY, _SHARED_MARKET_PROXY
+            _SHARED_MACRO        = macro
+            _SHARED_SPY          = spy_ret
+            _SHARED_MARKET_PROXY = market_proxy
             for task in tasks:
                 _handle(*process_ticker(task))
                 if args.sleep_ticker > 0:
