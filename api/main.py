@@ -891,14 +891,15 @@ def _unsup_vector_numpy(feats: Dict[str, Any], cfg: Dict[str, Any], cols: list[s
         try:
             fv = float(v)
             if not np.isfinite(fv):
-                fv = 0.0
+                fv = float("nan")  # keep NaN so bundle SimpleImputer applies training medians
         except Exception:
-            fv = 0.0
+            fv = float("nan")  # keep NaN so bundle SimpleImputer applies training medians
 
         row.append(fv)
 
+    # Do NOT nan_to_num here — imputer.transform() handles NaN with training-set medians.
+    # Fallback to 0-fill / nanmedian happens below (lines ~988-996) only if imputer absent/fails.
     X = np.asarray([row], dtype=float)
-    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
     return X
 
 
