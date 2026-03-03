@@ -1,6 +1,28 @@
 """
 scripts/ml/train/train_experts_v3.py
 =====================================
+*** DEPRECATED — use ml/train_v3.py instead ***
+
+This script was superseded during the convergence refactor (Agent 4, 2026-03-03).
+The single authoritative training entrypoint is now:
+
+    python ml/train_v3.py \\
+        --manifest data/training/v3/splits_manifest.json \\
+        --out_dir  models/v3
+
+Reasons for deprecation:
+  - Used implicit split generation (not manifest-based → not reproducible).
+  - Outputs diverged from pipeline standard (models/v3/v3_*_final.joblib vs
+    v3_lr_model.joblib / v3_xgb_model.joblib used by API).
+  - No calibration or threshold optimisation.
+  - Smoke mode now available in ml/train_v3.py via --max_rows.
+
+This file is kept for reference only. Do not use in production or CI.
+See: ml/train_v3.py, docs/HOWTO_V3_PIPELINE.md
+
+─────────────────────────────────────────────────────────────────────────────
+ORIGINAL DOCSTRING (preserved for reference):
+─────────────────────────────────────────────────────────────────────────────
 Trainer v3 — expanding-window CV, model export, per-fold signal backtest.
 
 Modèles disponibles : logistic, xgb (→ hgb si xgboost absent), hgb, lgbm

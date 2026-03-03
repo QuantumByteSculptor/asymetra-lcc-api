@@ -49,6 +49,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+_RANDOM_SEED = 42   # fixed seed for reproducible random-signal baseline
+
 log = logging.getLogger("backtest_signal_v3")
 
 # Annualisation factors (period returns)
@@ -202,25 +204,65 @@ EXPOSURE = {
     "always_block": 0.0,
 }
 
+_LABELS = ["ok", "warn", "block"]
+
+
+# ---------------------------------------------------------------------------
+# Turnover
+# ---------------------------------------------------------------------------
+
+def compute_turnover(exposures: np.ndarray) -> float:
+    """
+    Fraction of periods where the position (exposure) changes.
+    Ranges from 0 (never changes) to 1 (changes every period).
+    """
+    if len(exposures) < 2:
+        return 0.0
+    changes = np.sum(np.abs(np.diff(exposures)) > 1e-9)
+    return float(changes / (len(exposures) - 1))
+
+
+def apply_cost(
+    gross_returns: np.ndarray,
+    exposures: np.ndarray,
+    cost_bps: float,
+) -> np.ndarray:
+    """
+    Subtract transaction cost from each period where position changes.
+
+    cost_bps: one-way cost in basis points (e.g. 5 → 5 bps per side).
+    The cost applied is |Δexposure| × cost_bps / 10_000 per period.
+    """
+    if cost_bps <= 0.0:
+        return gross_returns.copy()
+    cost_per_bps = cost_bps / 10_000.0
+    delta_exp = np.abs(np.diff(exposures, prepend=0.0))
+    cost = delta_exp * cost_per_bps
+    return gross_returns - cost
+
 
 def simulate_strategy(
     records: List[Dict],
     mode: str,
     periods_per_year: float,
+    cost_bps: float = 0.0,
+    rng: Optional[np.random.Generator] = None,
 ) -> Dict[str, Any]:
     """
     Simulate strategy returns.
 
     mode:
-      "signal"       — use label-based exposure (OK=1, WARN=0.5, BLOCK=0)
+      "signal"       — label-based exposure (OK=1, WARN=0.5, BLOCK=0)
       "always_ok"    — exposure = 1.0 always
       "always_block" — exposure = 0.0 always
+      "random"       — random label assigned each period (fixed seed)
+
+    cost_bps: one-way transaction cost in basis points (applied on position changes).
     """
     sorted_recs = _sort_by_date(records)
 
-    strat_returns: List[float] = []
+    gross_returns: List[float] = []
     exposures: List[float] = []
-
     n_ok = n_warn = n_block = 0
 
     for rec in sorted_recs:
@@ -233,26 +275,45 @@ def simulate_strategy(
             exp = 1.0
         elif mode == "always_block":
             exp = 0.0
+        elif mode == "random":
+            # Uniformly draw from {ok, warn, block} with same empirical distribution
+            random_lbl = rng.choice(_LABELS) if rng is not None else "ok"  # type: ignore[union-attr]
+            exp = EXPOSURE.get(random_lbl, 0.5)
         else:
             exp = 0.5
 
-        strat_returns.append(fwd * exp)
+        gross_returns.append(fwd * exp)
         exposures.append(exp)
 
-        if lbl == "ok":    n_ok    += 1
-        elif lbl == "warn": n_warn  += 1
+        if lbl == "ok":      n_ok    += 1
+        elif lbl == "warn":  n_warn  += 1
         elif lbl == "block": n_block += 1
 
-    r_arr = np.array(strat_returns, dtype=float)
-    e_arr = np.array(exposures, dtype=float)
+    g_arr = np.array(gross_returns, dtype=float)
+    e_arr = np.array(exposures,     dtype=float)
 
-    metrics = compute_metrics(r_arr, label=mode, periods_per_year=periods_per_year)
-    metrics["avg_exposure"] = round(float(e_arr.mean()), 4)
-    metrics["n_ok"]    = n_ok
-    metrics["n_warn"]  = n_warn
-    metrics["n_block"] = n_block
+    # Net-of-cost returns
+    net_arr = apply_cost(g_arr, e_arr, cost_bps=cost_bps)
+    turnover = compute_turnover(e_arr)
 
-    return metrics
+    gross_metrics = compute_metrics(g_arr, label=mode,              periods_per_year=periods_per_year)
+    net_metrics   = compute_metrics(net_arr, label=f"{mode}_net",  periods_per_year=periods_per_year)
+
+    result = gross_metrics.copy()
+    result["avg_exposure"] = round(float(e_arr.mean()), 4)
+    result["n_ok"]         = n_ok
+    result["n_warn"]       = n_warn
+    result["n_block"]      = n_block
+    result["turnover"]     = round(turnover, 4)
+    result["cost_bps"]     = cost_bps
+    result["net"] = {
+        "sharpe_ann":  net_metrics.get("sharpe_ann"),
+        "sortino_ann": net_metrics.get("sortino_ann"),
+        "cagr":        net_metrics.get("cagr"),
+        "max_drawdown": net_metrics.get("max_drawdown"),
+    }
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -299,29 +360,45 @@ def _fmt(v: Any, pct: bool = False) -> str:
 
 
 def print_summary(result: Dict[str, Any], horizon: int) -> None:
-    n = result["n_records"]
-    print(f"\n{'='*70}")
-    print(f"  BACKTEST SIGNAL V3  —  horizon={horizon}d  records={n:,}")
-    print(f"{'='*70}")
+    n        = result["n_records"]
+    cost_bps = result.get("cost_bps", 0.0)
+    print(f"\n{'='*75}")
+    print(f"  BACKTEST SIGNAL V3  —  horizon={horizon}d  records={n:,}  cost={cost_bps}bps")
+    print(f"{'='*75}")
 
     signal  = result["signal"]
     always  = result["always_ok"]
     cash    = result["always_block"]
+    rand    = result.get("random_baseline", {})
 
-    print(f"  {'Strategy':<22} {'CAGR':>8} {'Sharpe':>8} {'Sortino':>8} "
-          f"{'MaxDD':>8} {'HitRate':>8} {'PF':>8}")
-    print(f"  {'─'*68}")
+    hdr = f"  {'Strategy':<22} {'CAGR':>8} {'Sharpe':>8} {'Sortino':>8} {'MaxDD':>9} {'Turnover':>9}"
+    print(hdr)
+    print(f"  {'─'*72}")
 
-    for name, m in [("signal", signal), ("always_ok (BM)", always), ("always_block", cash)]:
+    for name, m in [
+        ("signal",         signal),
+        ("always_ok (BM)", always),
+        ("always_block",   cash),
+        ("random (sanity)",rand),
+    ]:
+        to = m.get("turnover")
         print(f"  {name:<22} "
               f"{_fmt(m.get('cagr'), pct=True):>8} "
               f"{_fmt(m.get('sharpe_ann')):>8} "
               f"{_fmt(m.get('sortino_ann')):>8} "
-              f"{_fmt(m.get('max_drawdown'), pct=True):>8} "
-              f"{_fmt(m.get('hit_rate')):>8} "
-              f"{str(m.get('profit_factor', 'N/A')):>8}")
+              f"{_fmt(m.get('max_drawdown'), pct=True):>9} "
+              f"{f'{to:.2%}' if to is not None else '   N/A':>9}")
 
-    # Delta vs benchmark
+    # Net-of-cost line for signal
+    if cost_bps > 0 and "net" in signal:
+        nt = signal["net"]
+        print(f"\n  signal (net {cost_bps}bps)   "
+              f"{_fmt(nt.get('cagr'), pct=True):>8} "
+              f"{_fmt(nt.get('sharpe_ann')):>8} "
+              f"{_fmt(nt.get('sortino_ann')):>8} "
+              f"{_fmt(nt.get('max_drawdown'), pct=True):>9}")
+
+    # Alpha vs benchmark
     print(f"\n  Alpha vs always_ok (signal − BM):")
     for k in ["cagr", "sharpe_ann", "max_drawdown", "hit_rate"]:
         sv = signal.get(k)
@@ -331,25 +408,52 @@ def print_summary(result: Dict[str, Any], horizon: int) -> None:
             sign = "✅" if (k != "max_drawdown" and delta > 0) or (k == "max_drawdown" and delta > 0) else "⚠️ "
             print(f"    {sign} {k:<20} {delta:+.4f}")
 
+    # Random sanity check
+    rand_sharpe = rand.get("sharpe_ann")
+    sig_sharpe  = signal.get("sharpe_ann")
+    if rand_sharpe is not None and sig_sharpe is not None:
+        diff = float(sig_sharpe) - float(rand_sharpe)
+        print(f"\n  Random baseline Sharpe: {rand_sharpe:+.4f}  "
+              f"(signal beats random by {diff:+.4f})")
+
     print(f"\n  Exposure usage: ok={signal['n_ok']:,} warn={signal['n_warn']:,} "
-          f"block={signal['n_block']:,}  avg_exp={signal['avg_exposure']:.2%}")
+          f"block={signal['n_block']:,}  avg_exp={signal['avg_exposure']:.2%}  "
+          f"turnover={signal.get('turnover', 0):.2%}")
+
+    # Per-asset-type
+    by_type = result.get("by_asset_type", {})
+    if by_type:
+        print(f"\n  Per asset-type (signal):")
+        print(f"    {'Type':<12} {'n':>6} {'Sharpe':>8} {'MaxDD':>9} {'Block%':>8}")
+        for at, m in sorted(by_type.items(), key=lambda x: -(x[1].get("sharpe_ann") or 0)):
+            sh  = m.get("sharpe_ann")
+            mdd = m.get("max_drawdown")
+            br  = m.get("block_rate", 0)
+            nt  = m.get("n_total", 0)
+            print(f"    {at:<12} {nt:>6,} {_fmt(sh):>8} {_fmt(mdd, pct=True):>9} {br:.1%}")
 
     # Verdict
     sharpe_ok = (signal.get("sharpe_ann") or 0) > (always.get("sharpe_ann") or 0)
     mdd_ok    = (signal.get("max_drawdown") or -1) > (always.get("max_drawdown") or -1)
+    rand_ok   = (signal.get("sharpe_ann") or 0) > (rand.get("sharpe_ann") or 0)
     skip_rate = signal["n_block"] / n if n else 0
     skip_ok   = 0.10 <= skip_rate <= 0.60
 
-    verdict = "✅ SIGNAL QUALITY CONFIRMED" if (sharpe_ok and mdd_ok and skip_ok) else "⚠️  MIXED SIGNAL"
-    print(f"\n  {verdict}")
-    print(f"{'='*70}\n")
+    flags = sum([sharpe_ok, mdd_ok, rand_ok, skip_ok])
+    verdict = "✅ SIGNAL QUALITY CONFIRMED" if flags >= 3 else "⚠️  MIXED SIGNAL"
+    print(f"\n  {verdict}  ({flags}/4 criteria met)")
+    print(f"{'='*75}\n")
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def run_backtest(path: Path, horizon: int = 20) -> Dict[str, Any]:
+def run_backtest(
+    path: Path,
+    horizon: int = 20,
+    cost_bps: float = 0.0,
+) -> Dict[str, Any]:
     periods_per_year = _PERIODS_PER_YEAR_20D if horizon == 20 else _PERIODS_PER_YEAR_60D
 
     records = load_records(path, horizon=horizon)
@@ -361,21 +465,26 @@ def run_backtest(path: Path, horizon: int = 20) -> Dict[str, Any]:
         lbl = rec["label"]
         label_dist[lbl] = label_dist.get(lbl, 0) + 1
 
-    signal     = simulate_strategy(records, "signal",       periods_per_year)
-    always_ok  = simulate_strategy(records, "always_ok",    periods_per_year)
-    always_blk = simulate_strategy(records, "always_block", periods_per_year)
+    rng = np.random.default_rng(_RANDOM_SEED)
+
+    signal     = simulate_strategy(records, "signal",        periods_per_year, cost_bps=cost_bps)
+    always_ok  = simulate_strategy(records, "always_ok",     periods_per_year, cost_bps=cost_bps)
+    always_blk = simulate_strategy(records, "always_block",  periods_per_year, cost_bps=cost_bps)
+    random_sig = simulate_strategy(records, "random",        periods_per_year, cost_bps=cost_bps, rng=rng)
     by_type    = breakdown_by_asset_type(records, periods_per_year)
 
     return {
-        "generated_at": datetime.now().isoformat(),
-        "source_file":  str(path),
-        "horizon_days": horizon,
-        "n_records":    len(records),
+        "generated_at":       datetime.now().isoformat(),
+        "source_file":        str(path),
+        "horizon_days":       horizon,
+        "cost_bps":           cost_bps,
+        "n_records":          len(records),
         "label_distribution": label_dist,
-        "signal":       signal,
-        "always_ok":    always_ok,
-        "always_block": always_blk,
-        "by_asset_type": by_type,
+        "signal":             signal,
+        "always_ok":          always_ok,
+        "always_block":       always_blk,
+        "random_baseline":    random_sig,
+        "by_asset_type":      by_type,
     }
 
 
@@ -402,12 +511,14 @@ def main() -> None:
     )
 
     ap = argparse.ArgumentParser(description="Signal quality backtest for v3 labels")
-    ap.add_argument("--in",      dest="input",  required=True,
+    ap.add_argument("--in",       dest="input",    required=True,
                     help="Path to v3 JSONL dataset")
-    ap.add_argument("--out",     dest="output", default="data/metrics/backtest_v3.json",
+    ap.add_argument("--out",      dest="output",   default="data/metrics/backtest_v3.json",
                     help="Output JSON path (default: data/metrics/backtest_v3.json)")
-    ap.add_argument("--horizon", type=int, default=20, choices=[5, 10, 20, 60],
+    ap.add_argument("--horizon",  type=int,        default=20, choices=[5, 10, 20, 60],
                     help="Forward return horizon in days (default: 20)")
+    ap.add_argument("--cost_bps", type=float,      default=5.0,
+                    help="One-way transaction cost in basis points (default: 5)")
     args = ap.parse_args()
 
     input_path  = Path(args.input)
@@ -417,7 +528,7 @@ def main() -> None:
         log.error("Input not found: %s", input_path)
         sys.exit(1)
 
-    result = run_backtest(input_path, horizon=args.horizon)
+    result = run_backtest(input_path, horizon=args.horizon, cost_bps=args.cost_bps)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
