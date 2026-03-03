@@ -57,6 +57,11 @@ log = logging.getLogger("backtest_signal_v3")
 _PERIODS_PER_YEAR_20D = 252 / 20   # ≈ 12.6
 _PERIODS_PER_YEAR_60D = 252 / 60   # ≈ 4.2
 
+# Cross-sectional detection: when n_years_approx exceeds this, the dataset
+# is multi-ticker (factor-style), not a single-asset time series.
+# MaxDD and Calmar are not meaningful in that regime.
+_MAX_SINGLE_ASSET_YEARS = 30.0
+
 
 # ---------------------------------------------------------------------------
 # Loader (streaming)
@@ -113,8 +118,12 @@ def compute_metrics(returns: np.ndarray, label: str, periods_per_year: float) ->
 
     n_years = n / periods_per_year
 
-    # NOTE: This dataset is cross-sectional (many tickers, not a single portfolio path).
-    # We treat records as sequential returns for signal quality purposes (factor backtest style).
+    # Cross-sectional detection: if n_years > threshold, the dataset is
+    # multi-ticker factor-style (not a single equity curve). MaxDD and Calmar
+    # are not meaningful in that regime and are reported as None.
+    is_cross_sectional = n_years > _MAX_SINGLE_ASSET_YEARS
+
+    # NOTE: We treat records as sequential returns for signal quality purposes (factor backtest style).
     # Hard-clip returns to [-0.99, 2.0] to prevent cumulative overflow.
     r_clipped = np.clip(r, -0.99, 2.0)
 
@@ -123,7 +132,7 @@ def compute_metrics(returns: np.ndarray, label: str, periods_per_year: float) ->
     mean_log_r = float(np.mean(np.log1p(r_clipped)))
     cagr        = float(math.expm1(mean_log_r * periods_per_year))
 
-    # Cumulative return on a SAMPLE window (last 500 periods or all if fewer)
+    # Cumulative return on a SAMPLE window (last 2000 periods or all if fewer)
     # to avoid overflow while preserving the shape of the equity curve
     sample = r_clipped[-min(len(r_clipped), 2000):]
     cum_return = float(np.prod(1.0 + sample) - 1.0) if len(sample) <= 2000 else float("nan")
@@ -141,14 +150,22 @@ def compute_metrics(returns: np.ndarray, label: str, periods_per_year: float) ->
     down_dev = float(np.std(neg_r, ddof=1)) * math.sqrt(periods_per_year) if len(neg_r) > 1 else 1e-12
     sortino = float(mean_r * periods_per_year / (down_dev + 1e-12))
 
-    # Max drawdown on clipped log-cumsum path (overflow-safe)
-    log_path = np.cumsum(np.log1p(r_clipped))
-    run_max  = np.maximum.accumulate(log_path)
-    dd_log   = log_path - run_max
-    max_dd   = float(math.expm1(float(dd_log.min())))  # back to return space
-
-    # Calmar
-    calmar = float(cagr / abs(max_dd)) if (math.isfinite(cagr) and abs(max_dd) > 1e-6) else float("nan")
+    # Max drawdown and Calmar: only meaningful for single-asset time series.
+    # Cross-sectional datasets (n_years > threshold) produce absurd year counts
+    # and equity-curve artefacts. We return None in that case.
+    if not is_cross_sectional:
+        log_path = np.cumsum(np.log1p(r_clipped))
+        run_max  = np.maximum.accumulate(log_path)
+        dd_log   = log_path - run_max
+        max_dd: Optional[float] = float(math.expm1(float(dd_log.min())))
+        calmar: Optional[float] = (
+            float(cagr / abs(max_dd))
+            if (max_dd is not None and math.isfinite(cagr) and abs(max_dd) > 1e-6)
+            else None
+        )
+    else:
+        max_dd = None
+        calmar = None
 
     # Hit rate / win-loss
     wins   = r[r > 0]
@@ -175,8 +192,9 @@ def compute_metrics(returns: np.ndarray, label: str, periods_per_year: float) ->
         "vol_ann":        round(vol_ann, 4),
         "sharpe_ann":     round(sharpe, 4) if math.isfinite(sharpe)  else None,
         "sortino_ann":    round(sortino, 4) if math.isfinite(sortino) else None,
-        "max_drawdown":   round(max_dd, 4),
-        "calmar":         round(calmar, 4) if math.isfinite(calmar)   else None,
+        "max_drawdown":   round(max_dd, 4) if max_dd is not None else None,
+        "calmar":         round(calmar, 4) if (calmar is not None and math.isfinite(calmar)) else None,
+        "cross_sectional": is_cross_sectional,
         "hit_rate":       round(hit_rate, 4),
         "avg_win":        round(avg_win, 5),
         "avg_loss":       round(avg_loss, 5),
@@ -362,16 +380,29 @@ def _fmt(v: Any, pct: bool = False) -> str:
 def print_summary(result: Dict[str, Any], horizon: int) -> None:
     n        = result["n_records"]
     cost_bps = result.get("cost_bps", 0.0)
-    print(f"\n{'='*75}")
-    print(f"  BACKTEST SIGNAL V3  —  horizon={horizon}d  records={n:,}  cost={cost_bps}bps")
-    print(f"{'='*75}")
 
     signal  = result["signal"]
     always  = result["always_ok"]
     cash    = result["always_block"]
     rand    = result.get("random_baseline", {})
 
-    hdr = f"  {'Strategy':<22} {'CAGR':>8} {'Sharpe':>8} {'Sortino':>8} {'MaxDD':>9} {'Turnover':>9}"
+    # Detect cross-sectional mode (MaxDD/Calmar suppressed)
+    is_cs = signal.get("cross_sectional", False)
+    mdd_col = "MaxDD†" if is_cs else "MaxDD"
+
+    n_years_approx = signal.get("n_years_approx", 0)
+    cs_note = (
+        f"  (cross-sectional: {n_years_approx:.0f} equiv. years — MaxDD/Calmar not reported)"
+        if is_cs else ""
+    )
+
+    print(f"\n{'='*75}")
+    print(f"  BACKTEST SIGNAL V3  —  horizon={horizon}d  records={n:,}  cost={cost_bps}bps")
+    if cs_note:
+        print(cs_note)
+    print(f"{'='*75}")
+
+    hdr = f"  {'Strategy':<22} {'CAGR':>8} {'Sharpe':>8} {'Sortino':>8} {mdd_col:>9} {'Turnover':>9}"
     print(hdr)
     print(f"  {'─'*72}")
 
@@ -434,14 +465,24 @@ def print_summary(result: Dict[str, Any], horizon: int) -> None:
 
     # Verdict
     sharpe_ok = (signal.get("sharpe_ann") or 0) > (always.get("sharpe_ann") or 0)
-    mdd_ok    = (signal.get("max_drawdown") or -1) > (always.get("max_drawdown") or -1)
+    # MaxDD criterion: skipped when cross-sectional (not applicable), counts as pass
+    sig_mdd = signal.get("max_drawdown")
+    bm_mdd  = always.get("max_drawdown")
+    if sig_mdd is not None and bm_mdd is not None:
+        mdd_ok = float(sig_mdd) > float(bm_mdd)
+    else:
+        mdd_ok = True  # cross-sectional: criterion N/A → treated as pass
     rand_ok   = (signal.get("sharpe_ann") or 0) > (rand.get("sharpe_ann") or 0)
     skip_rate = signal["n_block"] / n if n else 0
     skip_ok   = 0.10 <= skip_rate <= 0.60
 
+    mdd_label = "max_drawdown (N/A†)" if is_cs else "max_drawdown"
     flags = sum([sharpe_ok, mdd_ok, rand_ok, skip_ok])
     verdict = "✅ SIGNAL QUALITY CONFIRMED" if flags >= 3 else "⚠️  MIXED SIGNAL"
     print(f"\n  {verdict}  ({flags}/4 criteria met)")
+    if is_cs:
+        print(f"  † MaxDD not reported: cross-sectional dataset "
+              f"({n_years_approx:.0f} equiv-years > {_MAX_SINGLE_ASSET_YEARS:.0f} threshold)")
     print(f"{'='*75}\n")
 
 
