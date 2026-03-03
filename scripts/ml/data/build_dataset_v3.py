@@ -609,6 +609,23 @@ def download_spy_returns(start: str, cache_dir: Optional[Path] = None) -> Tuple[
 # Feature helpers
 # ---------------------------------------------------------------------------
 
+def _norm_idx(s: pd.Series) -> pd.Series:
+    """
+    Return a copy of s with its DatetimeIndex normalised to tz-naive midnight dates.
+    Required for cross-asset intersection: Yahoo v8 returns 14:30 UTC timestamps;
+    download_spy_returns normalises SPY to midnight — without this both sides must match.
+    """
+    if s.empty:
+        return s
+    idx = pd.DatetimeIndex(s.index)
+    if idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    idx = idx.normalize()
+    out = pd.Series(s.values, index=idx, name=getattr(s, "name", None))
+    # Drop duplicate dates that can arise after normalization (e.g. DST transitions)
+    return out[~out.index.duplicated(keep="last")]
+
+
 def _safe(x) -> Optional[float]:
     if x is None:
         return None
@@ -797,33 +814,37 @@ def build_features_v3(
     hill_est = _hill_estimator(ret)
 
     # ---- Cross-asset (SPY correlation / beta)
+    # Both series are normalised to tz-naive midnight so intersection works regardless
+    # of whether the underlying provider returned 14:30 UTC or midnight timestamps.
     corr_spy = beta_mkt = corr_vix = None
+    ret_n = _norm_idx(returns)          # ticker returns, midnight-indexed
     if not spy_returns.empty:
-        common = closes.index.intersection(spy_returns.index)
-        if len(common) >= 60:
-            a = returns.reindex(common).dropna()
-            s = spy_returns.reindex(a.index).dropna()
-            common2 = a.index.intersection(s.index)
-            if len(common2) >= 30:
-                av = a.reindex(common2).to_numpy(dtype=float)[-252:]
-                sv = s.reindex(common2).to_numpy(dtype=float)[-252:]
-                mask = np.isfinite(av) & np.isfinite(sv)
-                av, sv = av[mask], sv[mask]
-                if len(av) >= 30:
-                    corr_spy = float(np.corrcoef(av, sv)[0, 1])
-                    var_s = float(np.var(sv, ddof=1))
-                    if var_s > 1e-12:
-                        beta_mkt = float(np.cov(av, sv, ddof=1)[0, 1] / var_s)
+        spy_n  = _norm_idx(spy_returns) # SPY returns, midnight-indexed
+        common = ret_n.index.intersection(spy_n.index)
+        if len(common) < 30:
+            log.debug("corr_spy: short intersection (%d pts) for %s", len(common), ticker)
+        if len(common) >= 30:
+            av = ret_n.reindex(common).to_numpy(dtype=float)[-252:]
+            sv = spy_n.reindex(common).to_numpy(dtype=float)[-252:]
+            mask = np.isfinite(av) & np.isfinite(sv)
+            av, sv = av[mask], sv[mask]
+            if len(av) >= 30:
+                corr_spy = float(np.corrcoef(av, sv)[0, 1])
+                var_s = float(np.var(sv, ddof=1))
+                if var_s > 1e-12:
+                    beta_mkt = float(np.cov(av, sv, ddof=1)[0, 1] / var_s)
 
     vix_series = macro.get("vix")
     if vix_series is not None and not vix_series.empty:
-        common = closes.index.intersection(vix_series.index)
-        if len(common) >= 60:
-            a = returns.reindex(common).dropna()
-            vr = vix_series.reindex(a.index).pct_change().dropna()
-            common2 = a.index.intersection(vr.index)
+        vix_n  = _norm_idx(vix_series)  # VIX levels, midnight-indexed (FRED = already midnight)
+        common = ret_n.index.intersection(vix_n.index)
+        if len(common) < 30:
+            log.debug("corr_vix: short intersection (%d pts) for %s", len(common), ticker)
+        if len(common) >= 30:
+            vr = vix_n.reindex(common).pct_change().dropna()
+            common2 = ret_n.index.intersection(vr.index)
             if len(common2) >= 30:
-                av = a.reindex(common2).to_numpy(dtype=float)[-120:]
+                av = ret_n.reindex(common2).to_numpy(dtype=float)[-120:]
                 vv = vr.reindex(common2).to_numpy(dtype=float)[-120:]
                 mask = np.isfinite(av) & np.isfinite(vv)
                 av, vv = av[mask], vv[mask]

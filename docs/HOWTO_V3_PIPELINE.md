@@ -19,7 +19,7 @@ build_dataset_v3.py     ──► data/training/train_v3_all.jsonl   (54k record
      ├── split_v3_time.py        ──► data/training/v3/fold_*/train.jsonl + val.jsonl
      │                                data/training/v3/splits_manifest.json
      │
-     ├── ml/train_v3.py          ──► models/v3/{v3_xgb_model, v3_lr_model,
+     ├── train/train_v3.py       ──► models/v3/{v3_xgb_model, v3_lr_model,
      │                                           v3_calibrator, v3_thresholds,
      │                                           v3_metrics}.joblib/.json
      │
@@ -141,12 +141,12 @@ data/training/v3/
 Entraîne LR + XGBoost sur les folds CV, calibre, et sauve les artifacts versionnés.
 
 ```bash
-py ml/train_v3.py \
+py scripts/ml/train/train_v3.py \
     --manifest data/training/v3/splits_manifest.json \
     --out_dir  models/v3
 
 # Sans LR (XGB uniquement, plus rapide)
-py ml/train_v3.py \
+py scripts/ml/train/train_v3.py \
     --manifest data/training/v3/splits_manifest.json \
     --out_dir  models/v3 \
     --no_lr

@@ -117,34 +117,40 @@ class TestCorrSpyNotNull:
 
     def test_timestamp_normalization_fixes_null(self):
         """
-        Pre-fix: 14:30 timestamps → empty intersection → None corr_spy.
-        Post-fix (normalized to midnight): non-empty intersection → float corr_spy.
+        Both 14:30 and midnight SPY timestamps must produce a valid corr_spy.
+
+        build_features_v3 applies _norm_idx() to BOTH sides of the intersection
+        (ticker returns and spy_returns), so timestamps are normalized internally
+        regardless of the source format.  14:30 → midnight normalization happens
+        at two points:
+          1. download_spy_returns() normalizes the cached series.
+          2. build_features_v3() calls _norm_idx() on each side before intersecting.
+        Result: neither variant should yield None.
         """
         closes, returns = _make_ticker_data(n=300)
 
-        # Pre-fix: 14:30 timestamps → broken alignment
-        spy_broken = _make_market_returns(n=500, tz_aware=True)
-        feats_broken = build_features_v3(
+        # 14:30 timestamps — previously "broken", now handled by _norm_idx
+        spy_1430 = _make_market_returns(n=500, tz_aware=True)
+        feats_1430 = build_features_v3(
             ticker="AAPL", asset_type="equity", market="US",
             closes=closes, returns=returns, macro={},
-            spy_returns=spy_broken,
+            spy_returns=spy_1430,
             window_end_date=pd.Timestamp("2021-01-15"),
         )
-        # With broken timestamps, intersection should be empty → None
-        assert feats_broken.get("corr_spy") is None, (
-            "Expected None with 14:30 timestamps (broken alignment)"
+        assert feats_1430.get("corr_spy") is not None, (
+            "Expected float corr_spy even with 14:30 timestamps (_norm_idx applied)"
         )
 
-        # Post-fix: normalized to midnight → works
-        spy_fixed = _make_normalized_market_returns(n=500)
-        feats_fixed = build_features_v3(
+        # Midnight timestamps — canonical form, must also work
+        spy_midnight = _make_normalized_market_returns(n=500)
+        feats_midnight = build_features_v3(
             ticker="AAPL", asset_type="equity", market="US",
             closes=closes, returns=returns, macro={},
-            spy_returns=spy_fixed,
+            spy_returns=spy_midnight,
             window_end_date=pd.Timestamp("2021-01-15"),
         )
-        assert feats_fixed.get("corr_spy") is not None, (
-            "Expected float corr_spy with normalized timestamps"
+        assert feats_midnight.get("corr_spy") is not None, (
+            "Expected float corr_spy with midnight timestamps"
         )
 
     def test_spy_index_hour_is_zero_after_download(self):
