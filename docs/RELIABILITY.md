@@ -1,18 +1,22 @@
-# Reliability & Scientific Validation — v3 Model
+# Reliability & Scientific Validation — v3/v4 Model
 
 > **TL;DR** — All metrics computed on out-of-sample data only (expanding-window CV).
 > No look-ahead bias. Full scientific report available as PDF.
+>
+> **v4** (current) adds bootstrap CI + statistical significance tests to the v3 baseline.
 
 ---
 
 ## Contents
 
 - [Overview](#overview)
+- [Version history](#version-history)
 - [Methodology](#methodology)
 - [Asset inventory](#asset-inventory)
 - [Generating assets](#generating-assets)
 - [Frontend integration](#frontend-integration)
-- [Offline export](#offline-export)
+- [Offline export (v3 and v4)](#offline-export)
+- [Finder paths](#finder-paths)
 
 ---
 
@@ -23,14 +27,30 @@ time-series cross-validation protocol to eliminate look-ahead bias.
 
 Key results (out-of-sample, 5 folds):
 
-| Metric                      | Value         |
-|-----------------------------|---------------|
-| XGB ROC-AUC (mean ± std)    | 0.742 ± 0.047 |
-| XGB calibrated AUC (final)  | 0.782         |
-| ECE (Expected Calibration)  | 0.028         |
-| Signal Sharpe (ann.)        | 0.91          |
-| Always-OK Sharpe            | 0.31          |
-| Max drawdown improvement    | ~30%          |
+| Metric                           | Value                     |
+|----------------------------------|---------------------------|
+| Fold 5 ROC-AUC (bootstrap mean)  | 0.787 [95% CI: 0.780, 0.795] |
+| Fold 5 PR-AUC (bootstrap mean)   | 0.769 [95% CI: 0.759, 0.779] |
+| XGB calibrated AUC (final)       | 0.782                     |
+| ECE (Expected Calibration)       | 0.028                     |
+| Signal Sharpe (ann.)             | 0.91                      |
+| Always-OK Sharpe                 | 0.31                      |
+| Max drawdown improvement         | ~30%                      |
+
+---
+
+## Version history
+
+| Version | Date       | Content                                   | Script                              |
+|---------|------------|-------------------------------------------|-------------------------------------|
+| **v3**  | 2026-03-04 | 8 ML + 7 financial plots + PDF            | `export_credibility_assets.sh`      |
+| **v4**  | 2026-03-04 | v3 + 4 robustness plots (bootstrap, fold 5) | `export_credibility_v4.sh`        |
+
+**v4 additions** (new plots):
+- `recent_fold_table.png` — Fold 5 detailed performance (most recent regime)
+- `auc_bootstrap_hist.png` — 1,000 bootstrap CI on ROC-AUC + PR-AUC
+- `sharpe_bootstrap_hist.png` — Bootstrap Sharpe significance test (signal vs baseline)
+- `confusion_metrics_per_fold.png` — Recall / Precision / FPR / F1 per fold
 
 ---
 
@@ -56,66 +76,82 @@ probability of 0.7 corresponds to a ~70% observed event rate (ECE < 0.03).
 All financial metrics (Sharpe, drawdown, return distributions) are computed
 on each fold's validation split. Strategies are never evaluated on training data.
 
+### Bootstrap (v4)
+
+1,000 bootstrap resamples with replacement on Fold 5 (12,291 out-of-sample observations).
+95% CI = [2.5th, 97.5th] percentile of resample distribution.
+
 ---
 
 ## Asset inventory
 
-### Statistical validation (`data/metrics/v3/plots/`)
+### Statistical validation — 12 plots in v4 (`data/metrics/v3/plots/`)
 
-| File                    | Description                              |
-|-------------------------|------------------------------------------|
-| `roc_curves.png`        | ROC curves per fold                      |
-| `pr_curves.png`         | Precision-Recall curves per fold         |
-| `calibration.png`       | Reliability diagram (predicted vs actual) |
-| `prob_distributions.png`| Score distributions by true label        |
-| `lift_curve.png`        | Cumulative lift over random baseline     |
-| `confusion_matrices.png`| Confusion matrices at production threshold |
-| `feature_importance.png`| XGBoost feature importance (gain)        |
-| `metrics_per_fold.png`  | AUC, AP, F1 stability across folds       |
+| File                              | v3 | v4 | Description                                      |
+|-----------------------------------|----|-----|--------------------------------------------------|
+| `roc_curves.png`                  | ✓  | ✓   | ROC curves per fold + mean                       |
+| `pr_curves.png`                   | ✓  | ✓   | Precision-Recall curves per fold                 |
+| `calibration.png`                 | ✓  | ✓   | Reliability diagram (predicted vs actual)        |
+| `prob_distributions.png`          | ✓  | ✓   | Score distributions by true label                |
+| `lift_curve.png`                  | ✓  | ✓   | Cumulative lift over random baseline             |
+| `confusion_matrices.png`          | ✓  | ✓   | Confusion matrices at production threshold       |
+| `feature_importance.png`          | ✓  | ✓   | XGBoost feature importance (gain)                |
+| `metrics_per_fold.png`            | ✓  | ✓   | AUC, AP, F1 stability across folds               |
+| `recent_fold_table.png`           |    | ✓   | **NEW** Fold 5 detailed metrics table            |
+| `auc_bootstrap_hist.png`          |    | ✓   | **NEW** Bootstrap CI: ROC-AUC + PR-AUC           |
+| `sharpe_bootstrap_hist.png`       |    | ✓   | **NEW** Bootstrap Sharpe significance test       |
+| `confusion_metrics_per_fold.png`  |    | ✓   | **NEW** Recall / Precision / FPR / F1 per fold   |
 
-### Financial validation (`data/metrics/v3/financial_plots/`)
+### Financial validation — 7 plots (`data/metrics/v3/financial_plots/`)
 
-| File                          | Description                              |
-|-------------------------------|------------------------------------------|
-| `cumulative_returns.png`      | Signal portfolio vs always-invested      |
-| `drawdown.png`                | Drawdown profile comparison              |
-| `return_distributions.png`   | Forward return distributions by signal   |
-| `skip_rate_rolling.png`      | Rolling skip rate (warn/block fraction)  |
-| `rolling_sharpe.png`         | 90-day rolling Sharpe ratio              |
-| `performance_by_asset_type.png` | Sharpe lift by asset category          |
-| `backtest_metrics_card.png`  | Aggregated backtest summary card         |
+| File                            | Description                              |
+|---------------------------------|------------------------------------------|
+| `cumulative_returns.png`        | Signal portfolio vs always-invested      |
+| `drawdown.png`                  | Drawdown profile comparison              |
+| `return_distributions.png`      | Forward return distributions by signal   |
+| `skip_rate_rolling.png`         | Rolling skip rate (warn/block fraction)  |
+| `rolling_sharpe.png`            | 90-day rolling Sharpe ratio              |
+| `performance_by_asset_type.png` | Sharpe lift by asset category            |
+| `backtest_metrics_card.png`     | Aggregated backtest summary card         |
 
 ### Scientific report
 
-`data/metrics/v3/V3_Scientific_Report.pdf` — ~1.5 MB, 9 sections:
+`data/metrics/v3/V3_Scientific_Report.pdf` — 1.90 MB, 11 sections:
 cover, dataset stats, validation protocol, ML performance, calibration,
-backtest, features, drift analysis, production-readiness verdict.
+backtest, features, drift analysis, **most-recent fold**, **statistical significance**,
+production-readiness verdict.
 
 ---
 
 ## Generating assets
 
-### 1. Generate plots + PDF (requires trained models)
+### 1. Generate all plots + PDF (requires trained models in `models/v3/`)
 
 ```bash
-# ML statistical plots
+# Step 1a — ML/statistical plots
 python scripts/ml/reporting/plot_ml_v3.py
 
-# Financial plots
+# Step 1b — Robustness plots (bootstrap CI, confusion metrics, fold 5 table)
+python scripts/ml/reporting/plot_robustness_v3.py
+
+# Step 1c — Financial plots
 python scripts/ml/reporting/plot_financial_v3.py
 
-# Scientific PDF report
-python scripts/ml/reporting/generate_v3_report.py
+# Step 1d — PDF report (11 sections, ~1.9 MB)
+python scripts/ml/reporting/generate_v3_report.py --no_plots
 ```
 
-### 2. Package for credibility page / export
+### 2. Package for credibility page
 
 ```bash
-# Collect + verify + write manifest.json → build/credibility/v3/
+# Export as v3 (8 stat + 7 finance = 16 assets)
 python scripts/ml/reporting/export_v3_credibility_assets.py
 
-# Dry-run to check without copying:
-python scripts/ml/reporting/export_v3_credibility_assets.py --dry-run
+# Export as v4 (12 stat + 7 finance = 20 assets) — RECOMMENDED
+python scripts/ml/reporting/export_v3_credibility_assets.py --version v4
+
+# Dry-run to verify sources before copying:
+python scripts/ml/reporting/export_v3_credibility_assets.py --version v4 --dry-run
 ```
 
 ---
@@ -124,16 +160,24 @@ python scripts/ml/reporting/export_v3_credibility_assets.py --dry-run
 
 The React component is in `frontend/src/pages/Reliability.tsx`.
 
-1. Copy `build/credibility/v3/` into your frontend `public/credibility/v3/`
-2. Add the route in your router config:
-   ```tsx
-   import Reliability from "./pages/Reliability";
-   <Route path="/reliability" element={<Reliability />} />
-   ```
-3. Add a nav link in the "À propos" section:
-   ```tsx
-   <NavLink to="/reliability">Fiabilité</NavLink>
-   ```
+```bash
+# Copy the versioned assets into your frontend public folder
+cp -r build/credibility/v4/ frontend/public/credibility/v4/
+
+# (or v3 for the original)
+cp -r build/credibility/v3/ frontend/public/credibility/v3/
+```
+
+Then in your router config:
+```tsx
+import Reliability from "./pages/Reliability";
+<Route path="/reliability" element={<Reliability />} />
+```
+
+Nav link in the "À propos" section:
+```tsx
+<NavLink to="/reliability">Fiabilité</NavLink>
+```
 
 See `frontend/src/pages/ReliabilityNavSnippet.md` for full integration details.
 
@@ -141,19 +185,54 @@ See `frontend/src/pages/ReliabilityNavSnippet.md` for full integration details.
 
 ## Offline export
 
-Export all assets to `~/Asymetra_Exports/credibility_v3/` with a static
-`index.html` viewer (no server required):
+### v3 export (original — 16 assets)
 
 ```bash
-bash scripts/utils/export_credibility_assets.sh
-
-# With rebuild:
-bash scripts/utils/export_credibility_assets.sh --rebuild
-
-# Open offline viewer:
+bash scripts/utils/export_credibility_assets.sh            # use existing build
+bash scripts/utils/export_credibility_assets.sh --rebuild  # rebuild then export
 open ~/Asymetra_Exports/credibility_v3/index.html
+```
+
+### v4 export (robustness upgrade — 20 assets) — RECOMMENDED
+
+```bash
+bash scripts/utils/export_credibility_v4.sh            # use existing build/credibility/v4/
+bash scripts/utils/export_credibility_v4.sh --rebuild  # rebuild v4 then export
+open ~/Asymetra_Exports/credibility_v4/index.html
+```
+
+### Single command to regenerate v4 from scratch
+
+```bash
+cd "/Users/paul.nytts/Asymetra code/.claude/worktrees/gifted-einstein" && \
+  /Users/paul.nytts/Asymetra\ code/.venv/bin/python3 \
+    scripts/ml/reporting/plot_robustness_v3.py && \
+  /Users/paul.nytts/Asymetra\ code/.venv/bin/python3 \
+    scripts/ml/reporting/generate_v3_report.py --no_plots && \
+  bash scripts/utils/export_credibility_v4.sh --rebuild
 ```
 
 ---
 
-*Last updated: 2026-03-04 — v3 model, gifted-einstein worktree*
+## Finder paths
+
+| What                   | Path                                                            |
+|------------------------|-----------------------------------------------------------------|
+| Source plots (ML)      | `data/metrics/v3/plots/`                                       |
+| Source plots (finance) | `data/metrics/v3/financial_plots/`                              |
+| Source PDF             | `data/metrics/v3/V3_Scientific_Report.pdf`                     |
+| Build v3               | `build/credibility/v3/`                                         |
+| Build v4               | `build/credibility/v4/`                                         |
+| Export v3 (Finder)     | `~/Asymetra_Exports/credibility_v3/`                            |
+| Export v4 (Finder)     | `~/Asymetra_Exports/credibility_v4/`                            |
+| React component        | `frontend/src/pages/Reliability.tsx`                            |
+| Export script v3       | `scripts/utils/export_credibility_assets.sh`                    |
+| Export script v4       | `scripts/utils/export_credibility_v4.sh`                        |
+| Python packager        | `scripts/ml/reporting/export_v3_credibility_assets.py`          |
+
+> **Finder shortcut:** `open ~/Asymetra_Exports/credibility_v4` opens the v4 folder in Finder.
+> `open ~/Asymetra_Exports/credibility_v4/index.html` opens the static viewer in your browser.
+
+---
+
+*Last updated: 2026-03-04 — v4 robustness upgrade, gifted-einstein worktree*

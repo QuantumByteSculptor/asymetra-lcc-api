@@ -387,11 +387,16 @@ def _write_manifest(manifest: dict, out_dir: Path, dry_run: bool) -> None:
         print(json.dumps(manifest, indent=2, ensure_ascii=False)[:800] + " ...")
 
 
-def export(dry_run: bool = False) -> int:
+def export(dry_run: bool = False, version: str = "v3") -> int:
     """
     Main entry point. Returns 0 on success, 1 on missing files.
+
+    Args:
+        dry_run: print actions without writing files
+        version: output version slug (e.g. "v3", "v4") — controls
+                 build/credibility/<version>/ and manifest["version"]
     """
-    out_dir = _REPO / "build" / "credibility" / "v3"
+    out_dir = _REPO / "build" / "credibility" / version
     print(f"{'[DRY RUN] ' if dry_run else ''}Exporting credibility assets → {out_dir}")
 
     # 1. Check sources
@@ -406,6 +411,7 @@ def export(dry_run: bool = False) -> int:
 
     # 2. Copy assets
     manifest = _copy_assets(out_dir, dry_run)
+    manifest["version"] = version          # stamp version into manifest
 
     # 3. Write manifest
     _write_manifest(manifest, out_dir, dry_run)
@@ -416,7 +422,7 @@ def export(dry_run: bool = False) -> int:
     print(f"\n[OK]  {stat_count} statistical plots")
     print(f"[OK]  {fin_count} financial plots")
     print(f"[OK]  PDF report ({manifest['report']['size_kb']} KB)")
-    print(f"\nTotal assets: {stat_count + fin_count + 1} files → build/credibility/v3/")
+    print(f"\nTotal assets: {stat_count + fin_count + 1} files → build/credibility/{version}/")
     return 0
 
 
@@ -426,11 +432,27 @@ def export(dry_run: bool = False) -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Export v3 credibility assets to build/credibility/v3/"
+        description="Export credibility assets to build/credibility/<version>/",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Export as v3 (default)
+  python scripts/ml/reporting/export_v3_credibility_assets.py
+
+  # Export as v4 (robustness upgrade milestone)
+  python scripts/ml/reporting/export_v3_credibility_assets.py --version v4
+
+  # Dry-run check for v4
+  python scripts/ml/reporting/export_v3_credibility_assets.py --version v4 --dry-run
+""",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="Print what would be done without copying files"
+        help="Print what would be done without copying files",
+    )
+    parser.add_argument(
+        "--version", default="v3",
+        help="Output version slug: v3, v4, ... (default: v3)",
     )
     args = parser.parse_args()
-    sys.exit(export(dry_run=args.dry_run))
+    sys.exit(export(dry_run=args.dry_run, version=args.version))

@@ -71,8 +71,9 @@ test_api.sh
 *.sh
 # ✅ Release gate (committed — not a local helper)
 !scripts/ml/validation/check_v3_release.sh
-# ✅ Credibility export script (committed — not a local helper)
+# ✅ Credibility export scripts (committed — not local helpers)
 !scripts/utils/export_credibility_assets.sh
+!scripts/utils/export_credibility_v4.sh
 
 # =========================
 # Release archives
