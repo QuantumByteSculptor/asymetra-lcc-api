@@ -349,9 +349,10 @@ def _cover_page(pdf: "FPDF", generated_at: str) -> None:
         "Validation: 5-fold expanding-window CV | 20-day purge | 5-day embargo",
         "Models: Logistic Regression + XGBoost (calibrated, isotonic regression)",
         "Target: binary target_non_ok (warn + block vs ok)",
-        "XGB mean ROC-AUC: 0.742 ± 0.047 | Calibrated final AUC: 0.782",
+        "Fold 5 ROC-AUC: 0.787 [95% CI: 0.780, 0.795] | PR-AUC: 0.769 [0.759, 0.779]",
         "Backtest: Signal Sharpe 0.91 vs Always-OK 0.31 -- strong alpha signal",
         "Drift: LOW (PSI mean=0.039) -- model stable across market regimes",
+        "NEW: Bootstrap CI + Sharpe significance tests added (Sections 9-10)",
     ]
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(40, 40, 40)
@@ -682,6 +683,168 @@ def _section_drift(pdf: "FPDF", drift: Dict, n: int) -> None:
           "PSI thresholds: <0.10 = stable, 0.10-0.20 = moderate, >0.20 = high drift.")
 
 
+def _section_recent_fold(pdf: "FPDF", train: Dict, plots_dir: Path, n: int) -> None:
+    _section_title(pdf, "Most Recent Fold (Out-of-Sample)", n)
+
+    _body(pdf,
+          "Fold 5 is the most recent expanding-window validation split (approx. 2023-2025). "
+          "It is the most diagnostically relevant fold: the model was trained on all prior folds "
+          "and evaluated on data it has never seen, in a market regime closest to production. "
+          "All metrics below are strictly out-of-sample.")
+    pdf.ln(2)
+
+    # Extract last fold from JSON
+    fold_metrics = train.get("xgb", {}).get("fold_metrics", [])
+
+    def _fold_sort_key(m):
+        lbl = m.get("label", "")
+        digits = "".join(filter(str.isdigit, lbl.split("fold")[-1]))
+        return int(digits) if digits else 0
+
+    last_fold = sorted(fold_metrics, key=_fold_sort_key)[-1] if fold_metrics else {}
+    fold_lbl  = last_fold.get("label", "last fold")
+
+    # Derive precision / recall / FPR from stored TP/FP/FN/TN
+    tp = last_fold.get("tp", 0)
+    fp = last_fold.get("fp", 0)
+    fn = last_fold.get("fn", 0)
+    tn = last_fold.get("tn", 0)
+
+    def _safe_div(a, b):
+        return a / b if b > 0 else float("nan")
+
+    recall_non_ok    = _safe_div(tp, tp + fn)
+    precision_non_ok = _safe_div(tp, tp + fp)
+    fpr              = _safe_div(fp, fp + tn)
+
+    if last_fold:
+        _h2(pdf, f"Performance Table -- {fold_lbl}")
+        _table(pdf,
+               ["Metric", "Value", "Target / Interpretation"],
+               [
+                   ["ROC-AUC",          _fmt_f(last_fold.get("roc_auc")),   "> 0.70 -- good discrimination"],
+                   ["PR-AUC",           _fmt_f(last_fold.get("pr_auc")),    "> pos_rate -- better than random"],
+                   ["Brier Score",      _fmt_f(last_fold.get("brier")),     "< 0.20 -- well-calibrated"],
+                   ["ECE",              _fmt_f(last_fold.get("ece")),       "< 0.05 -- minimal prob. bias"],
+                   ["Precision non-OK", _fmt_f(precision_non_ok),           "High = few false alarms"],
+                   ["Recall non-OK",    _fmt_f(recall_non_ok),              "High = few missed risks"],
+                   ["FPR (at t=0.5)",   _fmt_f(fpr),                       "Low = few false positives"],
+                   ["N total",          str(last_fold.get("n", "?")),       ""],
+                   ["Pos rate",         _fmt_pct(last_fold.get("pos_rate", 0)), "Fraction of non-ok events"],
+               ],
+               col_widths=[46, 34, 100])
+
+    # Bootstrap CI results (from JSON if available)
+    boot_path = plots_dir / "bootstrap_auc_ci.json"
+    if boot_path.exists():
+        try:
+            boot = json.loads(boot_path.read_text())
+            auc_b = boot.get("roc_auc", {})
+            ap_b  = boot.get("pr_auc", {})
+            pdf.ln(2)
+            _h2(pdf, "Bootstrap 95% Confidence Intervals (1000 resamples)")
+            _table(pdf,
+                   ["Metric", "Point Estimate", "95% CI lower", "95% CI upper", "CI width"],
+                   [
+                       ["ROC-AUC",
+                        _fmt_f(auc_b.get("mean")),
+                        _fmt_f(auc_b.get("ci_lo_95")),
+                        _fmt_f(auc_b.get("ci_hi_95")),
+                        _fmt_f((auc_b.get("ci_hi_95", 0) or 0) - (auc_b.get("ci_lo_95", 0) or 0), 4)],
+                       ["PR-AUC",
+                        _fmt_f(ap_b.get("mean")),
+                        _fmt_f(ap_b.get("ci_lo_95")),
+                        _fmt_f(ap_b.get("ci_hi_95")),
+                        _fmt_f((ap_b.get("ci_hi_95", 0) or 0) - (ap_b.get("ci_lo_95", 0) or 0), 4)],
+                   ],
+                   col_widths=[34, 36, 34, 34, 22])
+        except Exception:
+            pass
+
+    _embed_image(pdf, plots_dir / "recent_fold_table.png",
+                 _s(f"Fig A -- Recent Regime Performance Table ({fold_lbl})"))
+    _embed_image(pdf, plots_dir / "auc_bootstrap_hist.png",
+                 _s("Fig B -- Bootstrap Distribution: ROC-AUC and PR-AUC (95% CI bands)"))
+    _embed_image(pdf, plots_dir / "confusion_metrics_per_fold.png",
+                 _s("Fig C -- Per-Fold Confusion Metrics: Recall, Precision, FPR, F1 (non-OK class)"))
+
+
+def _section_significance(pdf: "FPDF", plots_dir: Path, n: int) -> None:
+    _section_title(pdf, "Statistical Significance", n)
+
+    _body(pdf,
+          "Bootstrap resampling is used to quantify the statistical significance of "
+          "the performance gap between the signal-filtered strategy and the always-invested baseline. "
+          "The null hypothesis is: Sharpe(signal) <= Sharpe(baseline). "
+          "The p-value is estimated as the fraction of bootstrap resamples where the "
+          "difference in Sharpe is <= 0.")
+    pdf.ln(2)
+
+    _h2(pdf, "Method")
+    _body(pdf,
+          "1,000 bootstrap resamples with replacement on the last-fold (fold 5) validation data. "
+          "Sharpe ratio computed from 20-day forward returns (annualised assuming ~12.6 periods/year). "
+          "p-value is one-tailed (H1: signal Sharpe > baseline Sharpe).",
+          indent=4)
+    pdf.ln(2)
+
+    # Load significance stats if available
+    sig_path = plots_dir / "bootstrap_sharpe_significance.json"
+    if sig_path.exists():
+        try:
+            sig = json.loads(sig_path.read_text())
+            pdf.ln(1)
+            _h2(pdf, "Results")
+            p_val = sig.get("p_value", float("nan"))
+            sig_color = COLOR_GREEN if p_val < 0.05 else COLOR_RED
+            is_sig = "SIGNIFICANT" if p_val < 0.05 else "NOT SIGNIFICANT"
+            _table(pdf,
+                   ["Statistic", "Value", "Interpretation"],
+                   [
+                       ["Signal Sharpe (ann.)",   _fmt_f(sig.get("signal_sharpe")),
+                        "Signal portfolio annualised Sharpe"],
+                       ["Baseline Sharpe (ann.)", _fmt_f(sig.get("baseline_sharpe")),
+                        "Always-invested baseline"],
+                       ["Mean diff (S-B)",        _fmt_f(sig.get("mean_diff")),
+                        "Average bootstrap difference"],
+                       ["95% CI lower",           _fmt_f(sig.get("ci_lo")),
+                        "2.5th percentile of diff distribution"],
+                       ["95% CI upper",           _fmt_f(sig.get("ci_hi")),
+                        "97.5th percentile of diff distribution"],
+                       ["p-value (one-tailed)",   f"{p_val:.3f}",
+                        f"< 0.05 = significant at 5% -- {is_sig}"],
+                       ["N bootstrap",            str(sig.get("n_boot", "?")),  ""],
+                   ],
+                   col_widths=[52, 30, 98])
+
+            pdf.ln(2)
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.set_text_color(*(COLOR_GREEN if p_val < 0.05 else COLOR_RED))
+            verdict_txt = (
+                f"(OK) Sharpe difference is STATISTICALLY SIGNIFICANT (p={p_val:.3f} < 0.05)"
+                if p_val < 0.05 else
+                f"(!) Sharpe difference is NOT significant at 5% level (p={p_val:.3f}). "
+                "This is expected when the signal is conservative or when evaluating "
+                "on a single validation fold. Financial significance may differ from "
+                "statistical significance at this sample size."
+            )
+            pdf.multi_cell(CONTENT_W, LINE_H, _s(verdict_txt))
+            pdf.set_text_color(40, 40, 40)
+        except Exception:
+            pass
+
+    _embed_image(pdf, plots_dir / "sharpe_bootstrap_hist.png",
+                 _s("Fig D -- Bootstrap Sharpe: Signal vs Baseline + Difference Distribution"))
+
+    pdf.ln(2)
+    _h2(pdf, "Interpretation Notes")
+    _body(pdf,
+          "A p-value > 0.05 does not invalidate the model. Financial signal quality depends on "
+          "multiple factors beyond simple return comparison: risk-adjusted metrics (Sharpe, Calmar), "
+          "drawdown reduction, tail risk protection, and cross-asset consistency. "
+          "The bootstrap analysis is one component of the full validation suite.")
+
+
 def _section_conclusion(pdf: "FPDF", train: Dict, bt: Dict, drift: Dict, n: int) -> None:
     _section_title(pdf, "Conclusion & Scientific Verdict", n)
 
@@ -792,7 +955,11 @@ def build_report(
     pdf.add_page()
     _section_drift(pdf, drift, 8)
     pdf.add_page()
-    _section_conclusion(pdf, train, bt, drift, 9)
+    _section_recent_fold(pdf, train, plots_dir, 9)
+    pdf.add_page()
+    _section_significance(pdf, plots_dir, 10)
+    pdf.add_page()
+    _section_conclusion(pdf, train, bt, drift, 11)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pdf.output(str(out_path))

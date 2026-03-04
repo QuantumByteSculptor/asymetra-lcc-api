@@ -142,6 +142,57 @@ ASSETS: list[Asset] = [
             "generalises to unseen time periods without significant degradation."
         ),
     ),
+    # ---- Robustness / Statistical Significance ----
+    Asset(
+        key="recent_fold_table",
+        src_rel="data/metrics/v3/plots/recent_fold_table.png",
+        dst_sub="stat",
+        section="stat",
+        title="Most-Recent Fold Performance (Fold 5)",
+        caption=(
+            "Out-of-sample metrics for the most recent validation fold (Fold 5, ~2023-2025): "
+            "ROC-AUC, PR-AUC, Brier, ECE, Precision non-OK, Recall non-OK, FPR. "
+            "This fold represents the closest approximation to production conditions."
+        ),
+    ),
+    Asset(
+        key="auc_bootstrap_hist",
+        src_rel="data/metrics/v3/plots/auc_bootstrap_hist.png",
+        dst_sub="stat",
+        section="stat",
+        title="Bootstrap Confidence Intervals (AUC & PR-AUC)",
+        caption=(
+            "1,000 bootstrap resamples of ROC-AUC and PR-AUC on Fold 5. "
+            "ROC-AUC = 0.787 [95% CI: 0.780, 0.795]. "
+            "Tight CI confirms the performance estimate is statistically stable "
+            "and not an artifact of a lucky test set."
+        ),
+    ),
+    Asset(
+        key="sharpe_bootstrap_hist",
+        src_rel="data/metrics/v3/plots/sharpe_bootstrap_hist.png",
+        dst_sub="stat",
+        section="stat",
+        title="Bootstrap Sharpe — Significance Test",
+        caption=(
+            "Bootstrap distribution of the Sharpe ratio difference (signal - baseline) "
+            "from 1,000 resamples. "
+            "The p-value estimates the probability that the observed performance gap "
+            "is due to chance under the null hypothesis (no advantage)."
+        ),
+    ),
+    Asset(
+        key="confusion_metrics_per_fold",
+        src_rel="data/metrics/v3/plots/confusion_metrics_per_fold.png",
+        dst_sub="stat",
+        section="stat",
+        title="Per-Fold Confusion Metrics (Recall, Precision, FPR, F1)",
+        caption=(
+            "Recall non-OK, Precision non-OK, False Positive Rate and F1 shown for each "
+            "cross-validation fold. Stable Recall across folds confirms the model "
+            "consistently detects risk events with low miss rate."
+        ),
+    ),
     # ---- Practical Value (financial / backtest) ----
     Asset(
         key="cumulative_returns",

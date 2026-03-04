@@ -580,3 +580,152 @@ class TestGenerateAll:
         # At minimum, by_asset_type and metrics_card should be generated
         assert "backtest_metrics_card" in result
         assert "performance_by_asset_type" in result
+
+# ── Phase 5: Robustness module (plot_robustness_v3) ───────────────────────────
+
+class TestPlotRobustness:
+    """Unit tests for plot_robustness_v3 — all functions with synthetic data."""
+
+    def test_recent_fold_table_generated(self, tmp_path):
+        """plot_recent_fold_table produces a PNG from fold_metrics JSON."""
+        from scripts.ml.reporting.plot_robustness_v3 import plot_recent_fold_table
+        train = _make_train_json(["vol_ann", "mdd", "var95"])
+        paths = plot_recent_fold_table(train, tmp_path)
+        assert len(paths) == 1
+        p = paths[0]
+        assert p.exists()
+        assert p.stat().st_size > 1000
+        assert p.suffix == ".png"
+
+    def test_recent_fold_table_empty_metrics(self, tmp_path):
+        """plot_recent_fold_table returns [] when no fold_metrics."""
+        from scripts.ml.reporting.plot_robustness_v3 import plot_recent_fold_table
+        paths = plot_recent_fold_table({}, tmp_path)
+        assert paths == []
+
+    def test_auc_bootstrap_hist_with_data(self, tmp_path):
+        """Bootstrap AUC histogram generated with synthetic fold data."""
+        from scripts.ml.reporting.plot_robustness_v3 import plot_auc_bootstrap_hist
+        folds_data = _make_folds_data(n_pos=150, n_neg=350, n_folds=2)
+        paths = plot_auc_bootstrap_hist(folds_data, tmp_path, n_boot=50)
+        assert len(paths) == 1
+        p = paths[0]
+        assert p.exists()
+        assert p.stat().st_size > 5000
+        # JSON CI file should also be written
+        ci_json = tmp_path / "bootstrap_auc_ci.json"
+        assert ci_json.exists()
+        data = json.loads(ci_json.read_text())
+        assert "roc_auc" in data
+        assert "pr_auc" in data
+        assert data["roc_auc"]["ci_lo_95"] <= data["roc_auc"]["ci_hi_95"]
+
+    def test_auc_bootstrap_hist_no_data(self, tmp_path):
+        """Bootstrap AUC produces stub PNG when no folds_data."""
+        from scripts.ml.reporting.plot_robustness_v3 import plot_auc_bootstrap_hist
+        paths = plot_auc_bootstrap_hist({}, tmp_path, n_boot=50)
+        assert len(paths) == 1
+        assert paths[0].exists()
+
+    def test_bootstrap_metric_function(self):
+        """_bootstrap_metric returns correct shape and CI direction."""
+        from scripts.ml.reporting.plot_robustness_v3 import _bootstrap_metric, _roc_auc_fn
+        rng = np.random.default_rng(42)
+        y = np.array([1] * 100 + [0] * 200)
+        p = np.concatenate([rng.beta(3, 2, 100), rng.beta(2, 4, 200)])
+        mean, lo, hi, samples = _bootstrap_metric(_roc_auc_fn, y, p, n_boot=100, seed=0)
+        assert 0 < lo <= mean <= hi <= 1.0
+        assert len(samples) == 100
+
+    def test_sharpe_significance_compute(self):
+        """compute_sharpe_significance returns valid stats dict."""
+        from scripts.ml.reporting.plot_robustness_v3 import compute_sharpe_significance
+        rng = np.random.default_rng(42)
+        sig_rets = rng.normal(0.003, 0.02, 500)
+        bm_rets  = rng.normal(0.001, 0.025, 500)
+        stats = compute_sharpe_significance(sig_rets, bm_rets, n_boot=100)
+        assert "mean_diff" in stats
+        assert "p_value" in stats
+        assert 0.0 <= stats["p_value"] <= 1.0
+        assert stats["ci_lo"] <= stats["ci_hi"]
+
+    def test_sharpe_bootstrap_hist_with_df(self, tmp_path):
+        """Sharpe bootstrap histogram generated from signal DataFrame."""
+        from scripts.ml.reporting.plot_robustness_v3 import plot_sharpe_bootstrap_hist
+        df = _make_signal_df(n=500)
+        paths = plot_sharpe_bootstrap_hist(df, t_lo=0.5, t_hi=0.65, out_dir=tmp_path, n_boot=50)
+        assert len(paths) == 1
+        p = paths[0]
+        assert p.exists()
+        assert p.stat().st_size > 5000
+        # Significance JSON written
+        sig_json = tmp_path / "bootstrap_sharpe_significance.json"
+        assert sig_json.exists()
+        sig = json.loads(sig_json.read_text())
+        assert "p_value" in sig
+        assert "mean_diff" in sig
+
+    def test_sharpe_bootstrap_hist_no_df(self, tmp_path):
+        """Sharpe bootstrap produces stub when df=None."""
+        from scripts.ml.reporting.plot_robustness_v3 import plot_sharpe_bootstrap_hist
+        paths = plot_sharpe_bootstrap_hist(None, t_lo=0.5, t_hi=0.65, out_dir=tmp_path, n_boot=50)
+        assert len(paths) == 1
+        assert paths[0].exists()
+
+    def test_confusion_metrics_per_fold_from_json(self, tmp_path):
+        """Confusion metrics plot generated from fold_metrics JSON (no raw data)."""
+        from scripts.ml.reporting.plot_robustness_v3 import plot_confusion_metrics_per_fold
+        train = _make_train_json(["vol_ann", "mdd"])
+        paths = plot_confusion_metrics_per_fold(train, {}, tmp_path)
+        assert len(paths) == 1
+        p = paths[0]
+        assert p.exists()
+        assert p.stat().st_size > 5000
+
+    def test_confusion_metrics_per_fold_from_raw(self, tmp_path):
+        """Confusion metrics plot from raw folds_data predictions."""
+        from scripts.ml.reporting.plot_robustness_v3 import plot_confusion_metrics_per_fold
+        folds_data = _make_folds_data(n_pos=150, n_neg=350, n_folds=3)
+        paths = plot_confusion_metrics_per_fold({}, folds_data, tmp_path)
+        assert len(paths) == 1
+        assert paths[0].exists()
+
+    def test_generate_all_robustness(self, tmp_path):
+        """generate_all_robustness runs end-to-end with synthetic data."""
+        from scripts.ml.reporting.plot_robustness_v3 import generate_all_robustness
+        train = _make_train_json(["vol_ann", "mdd", "var95"])
+        folds_data = _make_folds_data(n_pos=200, n_neg=500, n_folds=3)
+        df = _make_signal_df(n=600)
+        result = generate_all_robustness(
+            folds_data=folds_data,
+            metrics_data=train,
+            df_signal=df,
+            t_lo=0.5,
+            t_hi=0.65,
+            out_dir=tmp_path,
+            n_boot=50,
+        )
+        # All 4 objectives should produce outputs
+        assert "recent_fold_table"         in result
+        assert "auc_bootstrap_hist"        in result
+        assert "sharpe_bootstrap_hist"     in result
+        assert "confusion_metrics_per_fold" in result
+        for name, path in result.items():
+            assert path.exists(), f"{name} PNG missing: {path}"
+
+    def test_all_pngs_valid_header(self, tmp_path):
+        """All robustness PNGs start with PNG magic bytes."""
+        from scripts.ml.reporting.plot_robustness_v3 import generate_all_robustness
+        train = _make_train_json(["vol_ann", "mdd", "var95"])
+        folds_data = _make_folds_data(n_pos=200, n_neg=500, n_folds=3)
+        df = _make_signal_df(n=600)
+        result = generate_all_robustness(
+            folds_data=folds_data, metrics_data=train,
+            df_signal=df, t_lo=0.5, t_hi=0.65,
+            out_dir=tmp_path, n_boot=50,
+        )
+        PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+        for name, path in result.items():
+            with open(path, "rb") as f:
+                header = f.read(8)
+            assert header == PNG_MAGIC, f"{name}: not a valid PNG"
