@@ -71,6 +71,8 @@ test_api.sh
 *.sh
 # ✅ Release gate (committed — not a local helper)
 !scripts/ml/validation/check_v3_release.sh
+# ✅ Credibility export script (committed — not a local helper)
+!scripts/utils/export_credibility_assets.sh
 
 # =========================
 # Release archives
@@ -95,6 +97,11 @@ models.tar.gz
 # =========================
 data/metrics/
 data/training/v3/
+
+# =========================
+# Credibility build output (not versioned — regenerate with export script)
+# =========================
+build/credibility/
 
 # =========================
 # ✅ Legacy expert v2 reports (explicit allow — small, reference)
