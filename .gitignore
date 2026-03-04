@@ -74,6 +74,7 @@ test_api.sh
 # ✅ Credibility export scripts (committed — not local helpers)
 !scripts/utils/export_credibility_assets.sh
 !scripts/utils/export_credibility_v4.sh
+!scripts/utils/export_credibility_v4_1.sh
 
 # =========================
 # Release archives

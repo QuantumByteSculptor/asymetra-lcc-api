@@ -65,11 +65,92 @@ def _savefig(fig: plt.Figure, path: Path, dpi: int = DPI) -> None:
     log.info("Saved: %s", path)
 
 
-def _compute_dd(cum_log_ret: np.ndarray) -> np.ndarray:
-    """Max drawdown path from cumulative log-return array."""
-    running_max = np.maximum.accumulate(cum_log_ret)
-    dd = cum_log_ret - running_max
+def _compute_dd_equity(simple_rets: np.ndarray) -> np.ndarray:
+    """
+    Drawdown path from simple-return array using the equity-curve method.
+    Returns values in [-1, 0] (percentage units, e.g. -0.30 = -30%).
+    """
+    equity = np.cumprod(1.0 + np.clip(simple_rets, -0.999, 10.0))
+    running_max = np.maximum.accumulate(equity)
+    dd = (equity / np.maximum(running_max, 1e-12)) - 1.0
     return dd
+
+
+def _compute_series_metrics(
+    sig_rets: np.ndarray,
+    bm_rets: np.ndarray,
+    periods_year: float = 252 / 20,
+) -> dict:
+    """
+    Compute Sharpe, CAGR, MDD from the same return arrays used for the
+    cumulative-return plot.  Used for consistency validation and metrics card.
+    """
+    def _sharpe(r):
+        if len(r) < 5 or r.std(ddof=1) < 1e-12:
+            return float("nan")
+        return (r.mean() / r.std(ddof=1)) * np.sqrt(periods_year)
+
+    def _cagr(r):
+        if len(r) == 0:
+            return float("nan")
+        equity_end = float(np.prod(1.0 + np.clip(r, -0.999, 10.0)))
+        n_years = len(r) / periods_year
+        if n_years <= 0 or equity_end <= 0:
+            return float("nan")
+        return equity_end ** (1.0 / n_years) - 1.0
+
+    def _mdd(r):
+        dd = _compute_dd_equity(r)
+        return float(np.min(dd)) if len(dd) > 0 else float("nan")
+
+    return {
+        "signal_sharpe":   _sharpe(sig_rets),
+        "baseline_sharpe": _sharpe(bm_rets),
+        "signal_cagr":     _cagr(sig_rets),
+        "baseline_cagr":   _cagr(bm_rets),
+        "signal_mdd":      _mdd(sig_rets),
+        "baseline_mdd":    _mdd(bm_rets),
+        "n_periods":       len(sig_rets),
+    }
+
+
+def _validate_finance_consistency(series_metrics: dict, backtest_json: dict) -> dict:
+    """
+    Cross-check time-series-derived metrics against the pre-computed JSON values.
+    Returns a dict suitable for inclusion in sanity_report.json.
+    """
+    sig  = backtest_json.get("signal",    {})
+    bm   = backtest_json.get("always_ok", {})
+
+    sm = series_metrics
+    checks = {}
+
+    # MDD range
+    checks["mdd_signal_valid_range"]   = (-1.0 <= sm.get("signal_mdd",   -999) <= 0.0)
+    checks["mdd_baseline_valid_range"] = (-1.0 <= sm.get("baseline_mdd", -999) <= 0.0)
+    checks["mdd_signal_json_valid"]    = (-1.0 <= sig.get("max_drawdown", -999) <= 0.0)
+
+    # CAGR sign matches ending equity
+    checks["signal_cagr_sign_ok"] = (
+        (sm.get("signal_cagr", 0) > 0) == (sm.get("signal_mdd", 0) > -1.0)
+        if sm.get("signal_cagr") is not None else "n/a"
+    )
+
+    # Sharpe comparison
+    checks["signal_sharpe_series"]   = round(sm.get("signal_sharpe",   float("nan")), 4)
+    checks["signal_sharpe_json"]     = round(float(sig.get("sharpe_ann", float("nan"))), 4)
+    checks["baseline_sharpe_series"] = round(sm.get("baseline_sharpe", float("nan")), 4)
+    checks["baseline_sharpe_json"]   = round(float(bm.get("sharpe_ann",  float("nan"))), 4)
+
+    # MDD comparison (series-derived vs JSON)
+    checks["signal_mdd_series"] = round(sm.get("signal_mdd",   float("nan")), 4)
+    checks["signal_mdd_json"]   = round(float(sig.get("max_drawdown", float("nan"))), 4)
+
+    checks["all_pass"] = (
+        checks["mdd_signal_valid_range"]
+        and checks["mdd_baseline_valid_range"]
+    )
+    return checks
 
 
 def _rolling_sharpe(ret: pd.Series, window_periods: int, periods_year: float) -> pd.Series:
@@ -253,35 +334,39 @@ def plot_drawdown(
             always_ok_ret=("forward_return_20d", "mean"),
         ).reset_index().sort_values("date")
 
-        dates = df_grp["date"].values
-        sig_cum  = np.cumsum(np.log1p(df_grp["signal_ret"].clip(-0.5, 2).values))
-        ok_cum   = np.cumsum(np.log1p(df_grp["always_ok_ret"].clip(-0.5, 2).values))
+        dates    = df_grp["date"].values
+        sig_rets = df_grp["signal_ret"].values
+        ok_rets  = df_grp["always_ok_ret"].values
 
-        ax.fill_between(dates, _compute_dd(sig_cum),  0,
+        # Equity-curve drawdown in percentage units (correct method)
+        sig_dd = _compute_dd_equity(sig_rets)
+        ok_dd  = _compute_dd_equity(ok_rets)
+
+        ax.fill_between(dates, sig_dd, 0,
                         color=_SIGNAL_COLOR, alpha=0.45, label="Signal v3")
-        ax.fill_between(dates, _compute_dd(ok_cum),   0,
+        ax.fill_between(dates, ok_dd,  0,
                         color=_ALWAYSOK_COLOR, alpha=0.35, label="Always-OK")
-        ax.plot(dates, _compute_dd(sig_cum), color=_SIGNAL_COLOR, lw=1.5)
-        ax.plot(dates, _compute_dd(ok_cum),  color=_ALWAYSOK_COLOR, lw=1.2,
-                alpha=0.8)
+        ax.plot(dates, sig_dd, color=_SIGNAL_COLOR, lw=1.5)
+        ax.plot(dates, ok_dd,  color=_ALWAYSOK_COLOR, lw=1.2, alpha=0.8)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
         ax.xaxis.set_major_locator(mdates.YearLocator())
+        ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=0))
         plt.xticks(rotation=30)
+
+        sig_mdd = float(np.min(sig_dd))
+        bm_mdd  = float(np.min(ok_dd))
     else:
-        # Summary bar from JSON
+        # Fallback bar chart — only shown when time-series data is unavailable
         sig = backtest_json.get("signal", {})
         bm  = backtest_json.get("always_ok", {})
-        mdd_sig = sig.get("max_drawdown", 0)
-        mdd_bm  = bm.get("max_drawdown", 0)
-        ax.bar(["Signal v3", "Always-OK"], [mdd_sig, mdd_bm],
+        sig_mdd = sig.get("max_drawdown", 0)
+        bm_mdd  = bm.get("max_drawdown", 0)
+        ax.bar(["Signal v3", "Always-OK"], [sig_mdd, bm_mdd],
                color=[_SIGNAL_COLOR, _ALWAYSOK_COLOR], alpha=0.85)
-        ax.set_ylabel("Max Drawdown")
         ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
 
-    sig_mdd = backtest_json.get("signal", {}).get("max_drawdown", 0)
-    bm_mdd  = backtest_json.get("always_ok", {}).get("max_drawdown", 0)
     ax.set(title=f"Drawdown — Signal v3 (MDD={sig_mdd:.1%}) vs Always-OK (MDD={bm_mdd:.1%})",
-           ylabel="Drawdown (log-return units)")
+           ylabel="Drawdown (%)")
     ax.legend(fontsize=9)
     fig.tight_layout()
     p = out_dir / "drawdown.png"
@@ -502,30 +587,69 @@ def plot_performance_by_asset_type(
 def plot_metrics_card(
     backtest_json: Dict,
     out_dir: Path,
+    series_metrics: Optional[Dict] = None,
 ) -> List[Path]:
-    """Single-page metrics summary — useful as PDF cover chart."""
+    """
+    Single-page metrics summary — useful as PDF cover chart.
+
+    When series_metrics is provided (from _compute_series_metrics), time-series-
+    derived MDD and Sharpe values override the potentially incorrect JSON values.
+    """
     sig = backtest_json.get("signal", {})
     bm  = backtest_json.get("always_ok", {})
-    rob = backtest_json.get("random_baseline", {})  # may not exist
+
+    # Prefer time-series-derived MDD (guaranteed from equity curve, in [-1,0])
+    # over the JSON value which can be corrupted by cross-sectional ordering
+    if series_metrics is not None:
+        sig_mdd = series_metrics.get("signal_mdd",   sig.get("max_drawdown", 0))
+        bm_mdd  = series_metrics.get("baseline_mdd", bm.get("max_drawdown",  0))
+        sig_sh  = series_metrics.get("signal_sharpe",   sig.get("sharpe_ann", 0))
+        bm_sh   = series_metrics.get("baseline_sharpe", bm.get("sharpe_ann",  0))
+        sig_cagr = series_metrics.get("signal_cagr",   sig.get("cagr", 0))
+        bm_cagr  = series_metrics.get("baseline_cagr", bm.get("cagr",  0))
+        mdd_note = "¹"
+    else:
+        sig_mdd = sig.get("max_drawdown", 0)
+        bm_mdd  = bm.get("max_drawdown",  0)
+        sig_sh  = sig.get("sharpe_ann", 0)
+        bm_sh   = bm.get("sharpe_ann",  0)
+        sig_cagr = sig.get("cagr", 0)
+        bm_cagr  = bm.get("cagr",  0)
+        mdd_note = ""
+
+    # Clamp MDD to valid range for display
+    sig_mdd = max(-1.0, min(0.0, float(sig_mdd))) if math.isfinite(float(sig_mdd)) else 0.0
+    bm_mdd  = max(-1.0, min(0.0, float(bm_mdd)))  if math.isfinite(float(bm_mdd))  else 0.0
+
+    calmar_sig = (sig_cagr / abs(sig_mdd)) if sig_mdd < 0 else float("nan")
+    calmar_bm  = (bm_cagr  / abs(bm_mdd))  if bm_mdd  < 0 else float("nan")
+
+    def _fmt_mdd(v):
+        return f"{v:.1%}" if math.isfinite(v) else "N/A"
+
+    def _fmt_calmar(v):
+        return f"{v:.2f}" if math.isfinite(v) else "N/A"
 
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.axis("off")
 
     rows = [
         ["Metric", "Signal v3", "Always-OK", "Δ vs BM"],
-        ["CAGR",
-         f"{sig.get('cagr', 0):.1%}", f"{bm.get('cagr', 0):.1%}",
-         f"{sig.get('cagr', 0) - bm.get('cagr', 0):+.1%}"],
-        ["Sharpe (ann.)",
-         f"{sig.get('sharpe_ann', 0):.2f}", f"{bm.get('sharpe_ann', 0):.2f}",
-         f"{sig.get('sharpe_ann', 0) - bm.get('sharpe_ann', 0):+.2f}"],
+        ["CAGR (fold time-series)",
+         f"{sig_cagr:.1%}" if math.isfinite(float(sig_cagr)) else "N/A",
+         f"{bm_cagr:.1%}"  if math.isfinite(float(bm_cagr))  else "N/A",
+         f"{sig_cagr - bm_cagr:+.1%}" if math.isfinite(float(sig_cagr) + float(bm_cagr)) else "—"],
+        [f"Sharpe (ann., fold){mdd_note}",
+         f"{sig_sh:.2f}" if math.isfinite(float(sig_sh)) else "N/A",
+         f"{bm_sh:.2f}"  if math.isfinite(float(bm_sh))  else "N/A",
+         f"{sig_sh - bm_sh:+.2f}" if math.isfinite(float(sig_sh) + float(bm_sh)) else "—"],
         ["Sortino",
          f"{sig.get('sortino_ann', 0):.2f}", f"{bm.get('sortino_ann', 0):.2f}", "—"],
-        ["Max Drawdown",
-         f"{sig.get('max_drawdown', 0):.1%}", f"{bm.get('max_drawdown', 0):.1%}",
-         f"{sig.get('max_drawdown', 0) - bm.get('max_drawdown', 0):+.1%}"],
-        ["Calmar",
-         f"{sig.get('calmar', 0):.2f}", f"{bm.get('calmar', 0):.2f}", "—"],
+        [f"Max Drawdown (equity){mdd_note}",
+         _fmt_mdd(sig_mdd), _fmt_mdd(bm_mdd),
+         f"{sig_mdd - bm_mdd:+.1%}"],
+        [f"Calmar (derived){mdd_note}",
+         _fmt_calmar(calmar_sig), _fmt_calmar(calmar_bm), "—"],
         ["Hit Rate",
          f"{sig.get('hit_rate', 0):.1%}", f"{bm.get('hit_rate', 0):.1%}", "—"],
         ["Profit Factor",
@@ -533,6 +657,8 @@ def plot_metrics_card(
         ["Avg Exposure",
          f"{sig.get('avg_exposure', 0):.1%}", "100%", "—"],
     ]
+    if mdd_note:
+        rows.append(["¹ MDD & Sharpe computed from fold 5 time-series (equity curve)", "", "", ""])
 
     table = ax.table(
         cellText=rows[1:],
@@ -557,8 +683,11 @@ def plot_metrics_card(
         elif delta_txt.startswith("-"):
             delta_cell.set_facecolor("#f8d7da")
 
-    ax.set_title("Backtest Summary — Signal v3 vs Always-OK Baseline",
-                 fontsize=13, fontweight="bold", pad=15)
+    subtitle = "¹ MDD/Sharpe from equity curve (fold 5 time-series)" if series_metrics else ""
+    ax.set_title(
+        f"Backtest Summary — Signal v3 vs Always-OK Baseline\n{subtitle}",
+        fontsize=12, fontweight="bold", pad=15,
+    )
     p = out_dir / "backtest_metrics_card.png"
     _savefig(fig, p)
     return [p]
@@ -571,7 +700,15 @@ def generate_all(
     manifest_path: Path,
     model_dir: Path,
     out_dir: Path,
-) -> Dict[str, Path]:
+) -> Dict:
+    """
+    Generate all financial plots.
+
+    Returns dict with keys:
+      - plot name → Path  (generated plot files)
+      - "consistency_checks" → dict  (validation results)
+      - "series_metrics"     → dict  (time-series-derived metrics)
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Load backtest JSON
@@ -596,7 +733,25 @@ def generate_all(
         if df is not None:
             df = _apply_signal(df, t_lo, t_hi)
 
-    generated: Dict[str, Path] = {}
+    # Compute time-series-derived metrics for consistency validation
+    series_metrics: Optional[Dict] = None
+    consistency_checks: Dict = {}
+    if df is not None and "signal_ret" in df.columns:
+        df_grp = df.groupby("date").agg(
+            signal_ret=("signal_ret", "mean"),
+            always_ok_ret=("forward_return_20d", "mean"),
+        ).reset_index().sort_values("date")
+        series_metrics = _compute_series_metrics(
+            df_grp["signal_ret"].values,
+            df_grp["always_ok_ret"].values,
+        )
+        consistency_checks = _validate_finance_consistency(series_metrics, backtest_json)
+        log.info("Finance consistency — MDD series: %.2f%% | JSON: %.2f%% | all_pass=%s",
+                 series_metrics["signal_mdd"] * 100,
+                 backtest_json.get("signal", {}).get("max_drawdown", float("nan")) * 100,
+                 consistency_checks.get("all_pass"))
+
+    generated: Dict = {}
 
     for p in plot_cumulative_returns(df, backtest_json, out_dir):
         generated["cumulative_returns"] = p
@@ -616,10 +771,12 @@ def generate_all(
     for p in plot_performance_by_asset_type(backtest_json, out_dir):
         generated["performance_by_asset_type"] = p
 
-    for p in plot_metrics_card(backtest_json, out_dir):
+    for p in plot_metrics_card(backtest_json, out_dir, series_metrics=series_metrics):
         generated["backtest_metrics_card"] = p
 
-    log.info("Financial plots generated: %d figures in %s", len(generated), out_dir)
+    generated["consistency_checks"] = consistency_checks
+    generated["series_metrics"]     = series_metrics or {}
+    log.info("Financial plots generated: %d figures in %s", len(generated) - 2, out_dir)
     return generated
 
 

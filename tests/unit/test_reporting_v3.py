@@ -729,3 +729,88 @@ class TestPlotRobustness:
             with open(path, "rb") as f:
                 header = f.read(8)
             assert header == PNG_MAGIC, f"{name}: not a valid PNG"
+
+    # ── v4.1 new tests ────────────────────────────────────────────────────────
+
+    def test_compute_ece_perfect_calibration(self):
+        """_compute_ece = 0 when predictions equal observed rates."""
+        from scripts.ml.reporting.plot_robustness_v3 import _compute_ece
+        rng = np.random.default_rng(42)
+        # Perfect: prob = true rate in every bin
+        y_true = rng.choice([0, 1], size=1000, p=[0.6, 0.4])
+        y_prob = y_true.astype(float)  # prob=1 if pos, 0 if neg → ECE=0
+        ece = _compute_ece(y_true, y_prob)
+        assert ece == pytest.approx(0.0, abs=1e-9)
+
+    def test_compute_ece_miscalibrated(self):
+        """_compute_ece > 0 on a deliberately miscalibrated predictor."""
+        from scripts.ml.reporting.plot_robustness_v3 import _compute_ece
+        rng = np.random.default_rng(99)
+        n = 2000
+        y_true = rng.choice([0, 1], size=n, p=[0.5, 0.5])
+        # All predictions are 0.9 — wildly overconfident (true rate ≈ 0.5)
+        y_prob = np.full(n, 0.9)
+        ece = _compute_ece(y_true, y_prob)
+        assert ece > 0.35, f"Expected ECE > 0.35 for overconfident predictor, got {ece}"
+
+    def test_compute_ece_no_data(self):
+        """_compute_ece returns nan for empty arrays."""
+        from scripts.ml.reporting.plot_robustness_v3 import _compute_ece
+        ece = _compute_ece(np.array([]), np.array([]))
+        assert math.isnan(ece)
+
+    def test_recent_fold_table_uses_folds_data(self, tmp_path):
+        """plot_recent_fold_table uses max(folds_data.keys()) when folds_data provided."""
+        from scripts.ml.reporting.plot_robustness_v3 import plot_recent_fold_table
+        # 3 folds: keys 2, 3, 5 — should use fold 5
+        rng = np.random.default_rng(0)
+        folds_data = {}
+        for fk, n in [(2, 100), (3, 200), (5, 500)]:
+            y = np.array([1] * (n // 3) + [0] * (n - n // 3))
+            p = np.concatenate([rng.beta(4, 2, n // 3), rng.beta(2, 5, n - n // 3)])
+            folds_data[fk] = (y, p, p)
+        paths = plot_recent_fold_table({}, tmp_path, folds_data=folds_data)
+        assert len(paths) == 1
+        assert paths[0].exists()
+        assert paths[0].stat().st_size > 1000
+
+    def test_compute_dd_equity_valid_range(self):
+        """_compute_dd_equity always returns values in [-1, 0]."""
+        from scripts.ml.reporting.plot_financial_v3 import _compute_dd_equity
+        rng = np.random.default_rng(42)
+        for _ in range(20):
+            rets = rng.normal(0, 0.05, 200)
+            dd = _compute_dd_equity(rets)
+            assert np.all(dd <= 0.0),  f"DD has positive values: {dd.max()}"
+            assert np.all(dd >= -1.0), f"DD below -1: {dd.min()}"
+
+    def test_compute_series_metrics_consistency(self):
+        """_compute_series_metrics MDD is in [-1, 0] and CAGR sign is consistent."""
+        from scripts.ml.reporting.plot_financial_v3 import _compute_series_metrics
+        rng = np.random.default_rng(7)
+        sig_rets = rng.normal(0.003, 0.04, 300)
+        bm_rets  = rng.normal(0.001, 0.05, 300)
+        m = _compute_series_metrics(sig_rets, bm_rets)
+        assert -1.0 <= m["signal_mdd"]   <= 0.0
+        assert -1.0 <= m["baseline_mdd"] <= 0.0
+        # CAGR sign should be positive if equity grows (not guaranteed for random, just check finite)
+        assert math.isfinite(m["signal_cagr"])
+        assert math.isfinite(m["signal_sharpe"])
+
+    def test_validate_finance_consistency_all_pass(self):
+        """_validate_finance_consistency returns all_pass=True for clean data."""
+        from scripts.ml.reporting.plot_financial_v3 import (
+            _compute_series_metrics, _validate_finance_consistency,
+        )
+        rng = np.random.default_rng(3)
+        sig_rets = rng.normal(0.002, 0.03, 400)
+        bm_rets  = rng.normal(0.001, 0.04, 400)
+        m = _compute_series_metrics(sig_rets, bm_rets)
+        bt = {
+            "signal":    {"max_drawdown": -0.5, "sharpe_ann": 1.0},
+            "always_ok": {"max_drawdown": -0.7, "sharpe_ann": 0.5},
+        }
+        checks = _validate_finance_consistency(m, bt)
+        assert checks["mdd_signal_valid_range"]   is True
+        assert checks["mdd_baseline_valid_range"] is True
+        assert checks["all_pass"]                 is True

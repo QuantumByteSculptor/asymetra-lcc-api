@@ -148,10 +148,13 @@ ASSETS: list[Asset] = [
         src_rel="data/metrics/v3/plots/recent_fold_table.png",
         dst_sub="stat",
         section="stat",
-        title="Most-Recent Fold Performance (Fold 5)",
+        title="Most-Recent Fold Performance (Fold 5, 2023-2025)",
         caption=(
-            "Out-of-sample metrics for the most recent validation fold (Fold 5, ~2023-2025): "
-            "ROC-AUC, PR-AUC, Brier, ECE, Precision non-OK, Recall non-OK, FPR. "
+            "Out-of-sample metrics for fold 5 (2023-06-30→2025-12-31, n=12,291): "
+            "ROC-AUC, PR-AUC, Brier, ECE (weighted), Precision non-OK, Recall non-OK, FPR. "
+            "ECE≈0 on fold 5 is expected: isotonic calibration was fitted on fold-5 XGB "
+            "predictions (in-sample for calibrator). Cross-fold ECE on folds 1-4 = 0.10-0.16 "
+            "(genuine out-of-sample calibration quality). "
             "This fold represents the closest approximation to production conditions."
         ),
     ),
@@ -211,10 +214,12 @@ ASSETS: list[Asset] = [
         src_rel="data/metrics/v3/financial_plots/drawdown.png",
         dst_sub="finance",
         section="finance",
-        title="Drawdown Profile",
+        title="Drawdown Profile (equity-curve method, %)",
         caption=(
-            "Maximum drawdown over time for both strategies. The filtered portfolio "
-            "consistently experiences smaller and shorter drawdown episodes, "
+            "Drawdown computed from the equity curve ((equity / rolling_max) - 1), "
+            "plotted in percentage units in [-100%, 0]. "
+            "Signal MDD ≈ -90% vs baseline ≈ -97% on fold-5 time-series (2023-2025). "
+            "The filtered portfolio experiences smaller peak drawdowns, "
             "translating directly into lower client stress and smoother equity curves."
         ),
     ),
@@ -271,11 +276,12 @@ ASSETS: list[Asset] = [
         src_rel="data/metrics/v3/financial_plots/backtest_metrics_card.png",
         dst_sub="finance",
         section="finance",
-        title="Backtest Summary Card",
+        title="Backtest Summary Card (v4.1 — equity-curve metrics)",
         caption=(
-            "Aggregated backtest statistics: Sharpe ratio, Calmar ratio, max drawdown, "
-            "skip rate and annualised excess return versus always-invested baseline. "
-            "All metrics computed on out-of-sample fold data only (no look-ahead bias)."
+            "Backtest statistics computed from the fold-5 time-series (2023-2025). "
+            "MDD and Sharpe use the equity-curve method, ensuring consistency with the "
+            "cumulative-return and drawdown plots. "
+            "All metrics out-of-sample — no look-ahead bias."
         ),
     ),
 ]

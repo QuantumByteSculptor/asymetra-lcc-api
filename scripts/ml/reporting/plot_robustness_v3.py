@@ -120,6 +120,35 @@ def _bootstrap_metric(
     return point, ci_lo, ci_hi, samples_arr
 
 
+def _compute_ece(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    n_bins: int = 10,
+) -> float:
+    """
+    Weighted Expected Calibration Error.
+
+    Bins are equal-width over [0,1].  Only non-empty bins contribute.
+    Uses bin-size weighting to avoid small-sample bias.
+    Never rounds to 0 because it operates on raw float arithmetic.
+    """
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    n = len(y_true)
+    if n == 0:
+        return float("nan")
+    ece = 0.0
+    for i in range(n_bins):
+        lo, hi = bins[i], bins[i + 1]
+        mask = (y_prob >= lo) & (y_prob < hi) if i < n_bins - 1 else (y_prob >= lo) & (y_prob <= hi)
+        n_bin = mask.sum()
+        if n_bin == 0:
+            continue
+        frac_pos  = float(y_true[mask].mean())
+        mean_prob = float(y_prob[mask].mean())
+        ece += (n_bin / n) * abs(frac_pos - mean_prob)
+    return float(ece)
+
+
 def _roc_auc_fn(y, p):
     from sklearn.metrics import roc_auc_score
     return roc_auc_score(y, p)
@@ -145,38 +174,91 @@ def _sharpe_fn(rets: np.ndarray, periods_year: float = 12.6) -> float:
 def plot_recent_fold_table(
     metrics_data: Dict,
     out_dir: Path,
+    folds_data: Optional[Dict] = None,
 ) -> List[Path]:
     """
     Extract the most-recent fold metrics and render as a styled table PNG.
 
+    Priority:
+      1. folds_data (raw predictions from val.jsonl) — preferred.
+         Most-recent fold = max(folds_data.keys()), e.g. fold 5 (2023-2025).
+         ECE recomputed via _compute_ece (weighted, no empty-bin bias).
+      2. metrics_data (train_v3_report.json) — fallback only.
+
     Columns: ROC-AUC, PR-AUC, Brier, ECE, Precision_non_ok, Recall_non_ok, FPR
-    Also shows the calibrated-final row for comparison.
     """
-    fold_metrics = metrics_data.get("xgb", {}).get("fold_metrics", [])
-    if not fold_metrics:
-        log.warning("No fold_metrics found — skipping recent fold table")
-        return []
+    from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss
+    from sklearn.metrics import confusion_matrix
 
-    # Identify last fold (sort by label suffix integer if possible)
-    def _fold_sort_key(m):
-        lbl = m.get("label", "")
-        digits = "".join(filter(str.isdigit, lbl.split("fold")[-1]))
-        return int(digits) if digits else 0
+    # ── Source 1: actual fold predictions (preferred) ──────────────────────────
+    if folds_data:
+        last_fk = max(folds_data.keys())
+        y_true, y_prob, _ = folds_data[last_fk]
+        fold_label = f"fold_{last_fk}"
+        log.info("plot_recent_fold_table: using folds_data[%d] n=%d", last_fk, len(y_true))
 
-    last_fold = sorted(fold_metrics, key=_fold_sort_key)[-1]
-    fold_label = last_fold.get("label", "last fold")
+        try:
+            roc_auc = float(roc_auc_score(y_true, y_prob))
+        except Exception:
+            roc_auc = float("nan")
+        try:
+            pr_auc = float(average_precision_score(y_true, y_prob))
+        except Exception:
+            pr_auc = float("nan")
+        try:
+            brier = float(brier_score_loss(y_true, y_prob))
+        except Exception:
+            brier = float("nan")
 
-    # Derive additional metrics from TP/FP/FN/TN if available
-    tp = last_fold.get("tp", 0)
-    fp = last_fold.get("fp", 0)
-    fn = last_fold.get("fn", 0)
-    tn = last_fold.get("tn", 0)
+        ece = _compute_ece(y_true, y_prob)
 
-    recall_non_ok    = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
-    precision_non_ok = tp / (tp + fp) if (tp + fp) > 0 else float("nan")
-    fpr              = fp / (fp + tn) if (fp + tn) > 0 else float("nan")
+        threshold = 0.5
+        y_pred = (y_prob >= threshold).astype(int)
+        if y_true.sum() > 0 and (len(y_true) - y_true.sum()) > 0:
+            cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+            tn, fp, fn, tp = cm.ravel()
+        else:
+            tn = fp = fn = tp = 0
 
-    calibrated = metrics_data.get("xgb", {}).get("final_calibrated", {})
+        recall_non_ok    = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
+        precision_non_ok = tp / (tp + fp) if (tp + fp) > 0 else float("nan")
+        fpr              = fp / (fp + tn) if (fp + tn) > 0 else float("nan")
+
+        n_total = len(y_true)
+        n_pos   = int(y_true.sum())
+        n_neg   = n_total - n_pos
+
+        last_fold_row = {
+            "roc_auc": roc_auc, "pr_auc": pr_auc,
+            "brier": brier,     "ece":    ece,
+            "n": n_total, "n_pos": n_pos, "n_neg": n_neg,
+        }
+        calibrated = metrics_data.get("xgb", {}).get("final_calibrated", {})
+
+    # ── Source 2: metrics JSON (fallback — may have ECE=0 artefact) ────────────
+    else:
+        fold_metrics = metrics_data.get("xgb", {}).get("fold_metrics", [])
+        if not fold_metrics:
+            log.warning("No fold data — skipping recent fold table")
+            return []
+
+        def _fold_sort_key(m):
+            lbl = m.get("label", "")
+            digits = "".join(filter(str.isdigit, lbl.split("fold")[-1]))
+            return int(digits) if digits else 0
+
+        last_fold_row = sorted(fold_metrics, key=_fold_sort_key)[-1]
+        fold_label    = last_fold_row.get("label", "last fold")
+
+        tp = last_fold_row.get("tp", 0)
+        fp = last_fold_row.get("fp", 0)
+        fn = last_fold_row.get("fn", 0)
+        tn = last_fold_row.get("tn", 0)
+
+        recall_non_ok    = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
+        precision_non_ok = tp / (tp + fp) if (tp + fp) > 0 else float("nan")
+        fpr              = fp / (fp + tn) if (fp + tn) > 0 else float("nan")
+        calibrated = metrics_data.get("xgb", {}).get("final_calibrated", {})
 
     # Build display rows
     def _fmt(v, pct=False):
@@ -190,20 +272,20 @@ def plot_recent_fold_table(
     col_widths_fig = [0.22, 0.39, 0.39]
 
     rows = [
-        ["ROC-AUC",          _fmt(last_fold.get("roc_auc")),
+        ["ROC-AUC",          _fmt(last_fold_row.get("roc_auc")),
                              _fmt(calibrated.get("roc_auc"))],
-        ["PR-AUC",           _fmt(last_fold.get("pr_auc")),
+        ["PR-AUC",           _fmt(last_fold_row.get("pr_auc")),
                              _fmt(calibrated.get("pr_auc"))],
-        ["Brier Score ↓",   _fmt(last_fold.get("brier")),
+        ["Brier Score ↓",    _fmt(last_fold_row.get("brier")),
                              _fmt(calibrated.get("brier"))],
-        ["ECE ↓",            _fmt(last_fold.get("ece")),
+        ["ECE ↓ (weighted)", _fmt(last_fold_row.get("ece")),
                              _fmt(calibrated.get("ece"))],
         ["Precision non-OK", _fmt(precision_non_ok),          "—"],
         ["Recall non-OK",    _fmt(recall_non_ok),              "—"],
         ["FPR (at t=0.5)",   _fmt(fpr),                        _fmt(calibrated.get("fpr_at_tpr80"))],
-        ["N (total)",        str(last_fold.get("n", "?")),     str(calibrated.get("n", "?"))],
+        ["N (total)",        str(last_fold_row.get("n", "?")),     str(calibrated.get("n", "?"))],
         ["N pos / neg",
-         f"{last_fold.get('n_pos','?')} / {last_fold.get('n_neg','?')}",
+         f"{last_fold_row.get('n_pos','?')} / {last_fold_row.get('n_neg','?')}",
          f"{calibrated.get('n_pos','?')} / {calibrated.get('n_neg','?')}"],
     ]
 
@@ -729,8 +811,8 @@ def generate_all_robustness(
     out_dir.mkdir(parents=True, exist_ok=True)
     generated: Dict[str, Path] = {}
 
-    log.info("Obj 1 — Recent fold performance table...")
-    for p in plot_recent_fold_table(metrics_data, out_dir):
+    log.info("Obj 1 — Recent fold performance table (fold_data priority)...")
+    for p in plot_recent_fold_table(metrics_data, out_dir, folds_data=folds_data):
         generated["recent_fold_table"] = p
 
     log.info("Obj 2 — Bootstrap AUC CI (n_boot=%d)...", n_boot)
