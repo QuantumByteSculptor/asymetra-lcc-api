@@ -1,0 +1,117 @@
+{
+  "version": "v4.2",
+  "run_id": "20260303_221808",
+  "generated_at": "2026-03-07 15:04 UTC",
+  "generated_by": "generate_credibility_v4_2.py",
+  "git_commit": "469fffeeafd7",
+  "dataset_sha256_prefix": "d515ea217e36574d",
+  "data_sources": {
+    "ml_metrics": "models/v3/v3_metrics.json",
+    "thresholds": "models/v3/v3_thresholds.json",
+    "meta": "models/v3/v3_meta.json",
+    "splits_manifest": "data/training/v3/splits_manifest.json",
+    "backtest_robust": "data/metrics/backtest_v3_robust.json",
+    "sanity_report": "data/metrics/v3/sanity_report.json",
+    "drift": "data/metrics/drift_v3_report.json",
+    "dataset_report": "data/metrics/v3_dataset_report.json",
+    "qa_report": "data/metrics/qa_v3_report.json",
+    "bootstrap_auc": "data/metrics/v3/plots/bootstrap_auc_ci.json",
+    "bootstrap_sharpe": "data/metrics/v3/plots/bootstrap_sharpe_significance.json"
+  },
+  "figures_source": "build/credibility/v4.1/ (PNGs copied, unmodified)",
+  "consistency_checks_passed": true,
+  "report": {
+    "key": "credibility_v4_2",
+    "file": "Credibility_v4_2.pdf",
+    "title": "Asymetra LCC v3 Pipeline Credibility Report v4.2",
+    "size_kb": 1890.6
+  },
+  "sections": {
+    "stat": {
+      "label": "Statistical Validation",
+      "assets": [
+        {
+          "key": "roc_curves",
+          "file": "stat/roc_curves.png"
+        },
+        {
+          "key": "pr_curves",
+          "file": "stat/pr_curves.png"
+        },
+        {
+          "key": "calibration",
+          "file": "stat/calibration.png"
+        },
+        {
+          "key": "prob_distributions",
+          "file": "stat/prob_distributions.png"
+        },
+        {
+          "key": "lift_curve",
+          "file": "stat/lift_curve.png"
+        },
+        {
+          "key": "confusion_matrices",
+          "file": "stat/confusion_matrices.png"
+        },
+        {
+          "key": "feature_importance",
+          "file": "stat/feature_importance.png"
+        },
+        {
+          "key": "metrics_per_fold",
+          "file": "stat/metrics_per_fold.png"
+        },
+        {
+          "key": "recent_fold_table",
+          "file": "stat/recent_fold_table.png"
+        },
+        {
+          "key": "auc_bootstrap_hist",
+          "file": "stat/auc_bootstrap_hist.png"
+        },
+        {
+          "key": "sharpe_bootstrap_hist",
+          "file": "stat/sharpe_bootstrap_hist.png"
+        },
+        {
+          "key": "confusion_metrics_per_fold",
+          "file": "stat/confusion_metrics_per_fold.png"
+        }
+      ]
+    },
+    "finance": {
+      "label": "Practical Value",
+      "assets": [
+        {
+          "key": "cumulative_returns",
+          "file": "finance/cumulative_returns.png"
+        },
+        {
+          "key": "drawdown",
+          "file": "finance/drawdown.png"
+        },
+        {
+          "key": "return_distributions",
+          "file": "finance/return_distributions.png"
+        },
+        {
+          "key": "skip_rate_rolling",
+          "file": "finance/skip_rate_rolling.png"
+        },
+        {
+          "key": "rolling_sharpe",
+          "file": "finance/rolling_sharpe.png"
+        },
+        {
+          "key": "performance_by_asset_type",
+          "file": "finance/performance_by_asset_type.png"
+        },
+        {
+          "key": "backtest_metrics_card",
+          "file": "finance/backtest_metrics_card.png"
+        }
+      ]
+    }
+  }
+}
