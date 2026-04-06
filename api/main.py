@@ -418,9 +418,15 @@ def _as_close_series(df: pd.DataFrame, ticker: str) -> pd.Series:
     return pd.Series(dtype=float)
 
 
-def _download_daily_stooq(ticker: str, lookback_days: int, market: str) -> pd.Series:
+def _download_daily_stooq(
+    ticker: str,
+    lookback_days: int,
+    market: str,
+    max_tries: int = 3,
+    base_sleep: float = 2.0,
+) -> pd.Series:
     """
-    Robust Stooq downloader.
+    Robust Stooq downloader with exponential backoff on rate-limit errors.
     Fixes cloud/provider blocks where Stooq returns HTML/anti-bot instead of CSV.
     """
     t = (ticker or "").strip()
@@ -445,30 +451,49 @@ def _download_daily_stooq(ticker: str, lookback_days: int, market: str) -> pd.Se
         "Connection": "close",
     }
 
-    r = requests.get(url, headers=headers, timeout=25)
-    r.raise_for_status()
+    last_err: Optional[Exception] = None
+    for attempt in range(max_tries):
+        try:
+            r = requests.get(url, headers=headers, timeout=25)
 
-    txt = (r.text or "").strip()
-    if not txt:
-        raise RuntimeError("stooq returned empty body")
+            if r.status_code in (429, 503):
+                raise RuntimeError(f"stooq rate limit (HTTP {r.status_code})")
 
-    first_line = txt.splitlines()[0].strip()
-    if not first_line.lower().startswith("date,open,high,low,close"):
-        sample = txt[:300].replace("\n", "\\n")
-        raise RuntimeError(f"stooq non-csv response (first_line='{first_line[:80]}') sample='{sample}'")
+            r.raise_for_status()
 
-    df = pd.read_csv(io.StringIO(txt))
-    if df is None or df.empty or "Close" not in df.columns or "Date" not in df.columns:
-        raise RuntimeError(f"stooq parsed but missing columns: cols={list(df.columns) if df is not None else None}")
+            txt = (r.text or "").strip()
+            if not txt:
+                raise RuntimeError("stooq returned empty body")
 
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
-    df = df.dropna(subset=["Date", "Close"]).sort_values("Date")
+            first_line = txt.splitlines()[0].strip()
+            if not first_line.lower().startswith("date,open,high,low,close"):
+                sample = txt[:300].replace("\n", "\\n")
+                raise RuntimeError(f"stooq non-csv response (first_line='{first_line[:80]}') sample='{sample}'")
 
-    close = pd.Series(df["Close"].to_numpy(dtype=float), index=df["Date"]).dropna()
-    if len(close) >= lookback_days + 2:
-        return close.iloc[-(lookback_days + 2) :]
-    return close
+            df = pd.read_csv(io.StringIO(txt))
+            if df is None or df.empty or "Close" not in df.columns or "Date" not in df.columns:
+                raise RuntimeError(f"stooq parsed but missing columns: cols={list(df.columns) if df is not None else None}")
+
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+            df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+            df = df.dropna(subset=["Date", "Close"]).sort_values("Date")
+
+            close = pd.Series(df["Close"].to_numpy(dtype=float), index=df["Date"]).dropna()
+            if len(close) >= lookback_days + 2:
+                return close.iloc[-(lookback_days + 2):]
+            return close
+
+        except Exception as e:
+            last_err = e
+            msg = str(e).lower()
+            transient = any(k in msg for k in ("rate limit", "429", "503", "timeout", "connection", "reset"))
+            if not transient or attempt == max_tries - 1:
+                break
+            logger.warning("stooq rate limit for %s attempt %d/%d — retrying in %.1fs",
+                           t, attempt + 1, max_tries, base_sleep * (2 ** attempt))
+            time.sleep(base_sleep * (2 ** attempt))
+
+    raise last_err or RuntimeError(f"stooq failed for {t}")
 
 
 def _download_daily_yf(ticker: str, lookback_days: int, max_tries: int, sleep_try: float) -> pd.Series:

@@ -40,8 +40,8 @@ from features import DEFAULT_CONFIG, features_to_row  # type: ignore
 # Feature flag: EXPERTS_ENABLED (default OFF)
 # ---------------------------------------------------------------------------
 def is_experts_enabled() -> bool:
-    """Return True only if EXPERTS_ENABLED env var is explicitly '1'."""
-    return os.getenv("EXPERTS_ENABLED", "0").strip() == "1"
+    """Return True unless EXPERTS_ENABLED env var is explicitly set to '0'."""
+    return os.getenv("EXPERTS_ENABLED", "1").strip() not in ("0", "false", "False")
 
 # ---------------------------------------------------------------------------
 # Module-level expert cache (lazy, populated on first use)

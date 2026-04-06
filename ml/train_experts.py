@@ -214,17 +214,27 @@ def train_sup_bin(
     """Train calibrated XGB binary classifier, return sup_bin sub-bundle."""
     n0 = int((y == 0).sum())
     n1 = int((y == 1).sum())
+    n_total = len(y)
     spw = float(n0 / max(n1, 1))
 
+    # Scale complexity to dataset size to avoid overfitting on small classes
+    if n_total < 500:
+        n_estimators, max_depth, lr, reg_lambda, min_cw = 300, 3, 0.05, 2.0, 3.0
+    elif n_total < 2000:
+        n_estimators, max_depth, lr, reg_lambda, min_cw = 500, 4, 0.05, 1.5, 2.0
+    else:
+        n_estimators, max_depth, lr, reg_lambda, min_cw = 700, 5, 0.04, 1.0, 1.0
+
     base = XGBClassifier(
-        n_estimators=600,
-        max_depth=5,
-        learning_rate=0.05,
-        subsample=0.9,
-        colsample_bytree=0.9,
-        reg_lambda=1.0,
-        min_child_weight=1.0,
-        gamma=0.0,
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=lr,
+        subsample=0.85,
+        colsample_bytree=0.85,
+        reg_lambda=reg_lambda,
+        reg_alpha=0.1,
+        min_child_weight=min_cw,
+        gamma=0.05,
         objective="binary:logistic",
         eval_metric="logloss",
         n_jobs=-1,
@@ -301,9 +311,14 @@ def train_expert_bundle(
         label_dist = Counter(r["label"] for r in records)
         print(f"  [{asset_type}] n_total={n_all}, n_ok={n_ok}, dist={dict(label_dist)}")
 
-    if n_all < min_samples or n_ok < max(20, min_samples // 5):
+    # For data-scarce asset classes (fx, crypto, commodity) allow
+    # training with as few as 80 total records if at least 20 are ok-labeled.
+    effective_min = max(80, min_samples) if n_all < min_samples else min_samples
+    min_ok = max(20, effective_min // 5)
+    if n_all < effective_min or n_ok < min_ok:
         if verbose:
-            print(f"  [{asset_type}] SKIP — insufficient samples (need {min_samples} total, {min_samples//5} ok)")
+            print(f"  [{asset_type}] SKIP — insufficient samples "
+                  f"(n_all={n_all}<{effective_min} or n_ok={n_ok}<{min_ok})")
         return None
 
     # Build matrices

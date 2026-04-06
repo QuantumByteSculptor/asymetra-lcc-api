@@ -61,6 +61,11 @@ NUMERIC_BASE: List[str] = [
     "vol_ewma_ann",
     "stress_var99",
     "stress_multiplier",
+
+    # v4.2: market context (may be NaN for assets without SPY correlation)
+    "corr_spy",
+    "beta_market",
+    "vix_level",
 ]
 
 
@@ -97,6 +102,11 @@ DERIVED: List[str] = [
     # v2 derived
     "downside_div_vol",         # downside_dev / vol_ann (tail asymmetry index)
     "worst_5d_vs_var99",        # abs(worst_5d_ret) / var99 (stress vs normal tail risk)
+
+    # v4.2 derived
+    "corr_spy_sq",              # corr_spy^2 — nonlinear market-coupling signal
+    "beta_abs",                 # |beta_market| — absolute exposure to market swings
+    "vix_vol_interaction",      # vix_level * vol_ann — stress-scaled volatility
 ]
 
 
@@ -195,6 +205,10 @@ def compute_derived(feats: Dict[str, Any]) -> Dict[str, float]:
     tail_obs_99 = _to_float(feats.get("tail_obs_99"))
 
     corr_mkt = _to_float(feats.get("corr_mkt"))
+    # v4.2 market-context features (alias: corr_spy preferred, corr_mkt as fallback)
+    corr_spy = _to_float(feats.get("corr_spy") if feats.get("corr_spy") is not None else feats.get("corr_mkt"))
+    beta_market = _to_float(feats.get("beta_market"))
+    vix_level = _to_float(feats.get("vix_level"))
     rsi = _to_float(feats.get("rsi"))
 
     dd_duration = _to_float(feats.get("dd_duration"))
@@ -253,6 +267,15 @@ def compute_derived(feats: Dict[str, Any]) -> Dict[str, float]:
         # v2 derived
         "downside_div_vol": _safe_div(downside_dev, vol_ann),
         "worst_5d_vs_var99": _safe_div(abs(worst_5d_ret) if math.isfinite(worst_5d_ret) else float("nan"), var99),
+
+        # v4.2 derived
+        "corr_spy_sq": float("nan") if not math.isfinite(corr_spy) else corr_spy ** 2,
+        "beta_abs": float("nan") if not math.isfinite(beta_market) else abs(beta_market),
+        "vix_vol_interaction": (
+            float("nan")
+            if not (math.isfinite(vix_level) and math.isfinite(vol_ann))
+            else vix_level * vol_ann
+        ),
     }
 
     return out
