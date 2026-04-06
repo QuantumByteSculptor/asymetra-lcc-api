@@ -8,10 +8,11 @@
        assets : {'equity': 2725, 'etf': 960}
        v2 features present: yes (holdout_v2 built from train_v2_all)
 
-[MODELS] Expert bundles loaded: ['equity', 'etf', 'global']
-  equity      n_train= 11242  t_lo=0.6682  t_hi=0.8531  features=91
-  etf         n_train=  3660  t_lo=0.2216  t_hi=0.7615  features=91
-  global      n_train= 14902  t_lo=0.6221  t_hi=0.8588  features=91
+[MODELS] Expert bundles loaded: ['crypto', 'equity', 'etf', 'global']
+  crypto      n_train=   329  t_lo=0.8180  t_hi=0.8393  features=97
+  equity      n_train= 12213  t_lo=0.5455  t_hi=0.7899  features=97
+  etf         n_train=  2573  t_lo=0.2565  t_hi=0.7284  features=97
+  global      n_train= 15115  t_lo=0.5424  t_hi=0.8034  features=97
 
 [MODELS] bin_sigmoid loaded  t_lo=0.5070  t_hi=0.8500  n_cols=80
 
@@ -20,22 +21,22 @@
 ────────────────────────────────────────────────────────────────────
   Métrique                    bin_sigmoid     Expert v2          Δ
   ──────────────────────────────────────────────────────────────
-  Accuracy                         0.5400        0.5986 ▲  +0.0586
-  Balanced Accuracy                0.3978        0.4647 ▲  +0.0669
-  Macro F1                         0.3455        0.4526 ▲  +0.1071
-  FP-rate OK                       0.1464        0.1074 ▲  -0.0390
-  Recall NON-OK                    0.4480        0.5270 ▲  +0.0790
-  ROC-AUC                          0.7638        0.8145 ▲  +0.0506
-  PR-AUC                           0.7185        0.7967 ▲  +0.0782
-  ECE                              0.0780        0.0328 ▲  -0.0451
+  Accuracy                         0.5400        0.5821 ▲  +0.0421
+  Balanced Accuracy                0.3978        0.4144 ▲  +0.0166
+  Macro F1                         0.3455        0.3723 ▲  +0.0268
+  FP-rate OK                       0.1464        0.0505 ▲  -0.0959
+  Recall NON-OK                    0.4480        0.3880 ▼  -0.0600
+  ROC-AUC                          0.7638        0.7821 ▲  +0.0182
+  PR-AUC                           0.7185        0.7702 ▲  +0.0517
+  ECE                              0.0780        0.1233 ▼  +0.0454
 
 ────────────────────────────────────────────────────────────────────
   PAR CLASSE — Expert v2
 ────────────────────────────────────────────────────────────────────
   Classe     Precision      Recall          F1    Support
-  ok            0.6918      0.8926      0.7795       2002
-  warn          0.3124      0.3555      0.3326        827
-  block         0.7764      0.1460      0.2458        856
+  ok            0.6486      0.9496      0.7707       2002
+  warn          0.2957      0.2563      0.2746        827
+  block         0.8649      0.0374      0.0717        856
 
 ────────────────────────────────────────────────────────────────────
   PAR CLASSE — bin_sigmoid
@@ -49,9 +50,9 @@
   MATRICE DE CONFUSION — Expert v2
 ────────────────────────────────────────────────────────────────────
                Pred:   ok  Pred: warn  Pred:block
-  True:     ok        1787         213           2
-  True:   warn         499         294          34
-  True:  block         297         434         125
+  True:     ok        1901         101           0
+  True:   warn         610         212           5
+  True:  block         420         404          32
 
 ────────────────────────────────────────────────────────────────────
   MATRICE DE CONFUSION — bin_sigmoid
@@ -65,34 +66,35 @@
   PERFORMANCE PAR ASSET TYPE — Expert v2
 ────────────────────────────────────────────────────────────────────
        Asset      n      Acc   BalAcc    MacF1   RecNonOK    FP_OK      ROC
-      equity   2725   0.5391   0.4455   0.4224     0.4895   0.1079   0.7734
-         etf    960   0.7677   0.5518   0.5361     0.7373   0.1064   0.8793
+      equity   2725   0.5237   0.4167   0.3627     0.4132   0.0694   0.7669
+         etf    960   0.7479   0.3822   0.3629     0.2471   0.0156   0.8071
 
 ────────────────────────────────────────────────────────────────────
   SEUILS PAR ASSET TYPE — Expert v2
 ────────────────────────────────────────────────────────────────────
          Asset     t_lo     t_hi    n_train    FP@t_lo   Rec@t_lo
-        equity   0.6682   0.8531      11242     0.1079     0.4895
-           etf   0.2216   0.7615       3660     0.1064     0.7373
-        global   0.6221   0.8588      14902     0.0989     0.5098
+        crypto   0.8180   0.8393        329     0.0000     0.0000
+        equity   0.5455   0.7899      12213     0.0694     0.4132
+           etf   0.2565   0.7284       2573     0.0156     0.2471
+        global   0.5424   0.8034      15115     0.0475     0.3559
 
 ════════════════════════════════════════════════════════════════════
   RAPPORT SYNTHÉTIQUE
 ════════════════════════════════════════════════════════════════════
 
   POINTS FORTS:
-    ✅ ROC-AUC solide (0.814)
-    ✅ FP-rate OK respecté (0.107 ≤ 0.15)
-    ✅ Recall NON-OK atteint (0.527 ≥ 0.45)
-    ✅ Calibration OK (ECE=0.033)
-    ✅ Expert v2 bat bin_sigmoid en ROC-AUC (0.814 vs 0.764)
+    ✅ ROC-AUC solide (0.782)
+    ✅ FP-rate OK respecté (0.050 ≤ 0.15)
+    ✅ Expert v2 bat bin_sigmoid en ROC-AUC (0.782 vs 0.764)
 
   POINTS FAIBLES / RISQUES:
-    ⚠️  Experts manquants (→ fallback global): ['commodity', 'fx', 'crypto']
+    ⚠️  Recall NON-OK faible (0.388), cible 0.45
+    ⚠️  Calibration dégradée (ECE=0.123)
+    ⚠️  Experts manquants (→ fallback global): ['commodity', 'fx']
 
 ════════════════════════════════════════════════════════════════════
   VERDICT FINAL: ✅  DÉPLOYABLE (sous monitoring)
   Critères critiques respectés. Activer EXPERTS_ENABLED=1 en prod avec monitoring fp_rate + recall.
 ════════════════════════════════════════════════════════════════════
 
-  📄 JSON  → data/metrics/experts_v2_report.json
+  📄 JSON  → /tmp/eval_v42_holdout.json

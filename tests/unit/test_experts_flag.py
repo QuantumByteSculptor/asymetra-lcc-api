@@ -35,11 +35,11 @@ class TestExpertsDisabled:
         assert is_experts_enabled() is False
 
     @patch.dict(os.environ, {}, clear=False)
-    def test_default_is_disabled(self):
-        """If EXPERTS_ENABLED is not set at all, default is disabled."""
+    def test_default_is_enabled(self):
+        """If EXPERTS_ENABLED is not set at all, default is ENABLED (changed 2026-04-06)."""
         os.environ.pop("EXPERTS_ENABLED", None)
         from api.scoring import is_experts_enabled
-        assert is_experts_enabled() is False
+        assert is_experts_enabled() is True
 
     @patch.dict(os.environ, {"EXPERTS_ENABLED": "0"})
     def test_score_expert_returns_none(self, base_feats):
@@ -168,7 +168,8 @@ class TestExpertsEnabledNoBundles:
 class TestAPIWithFlag:
     """Integration tests via TestClient with feature flag."""
 
-    def test_health_experts_disabled(self):
+    @patch.dict(os.environ, {"EXPERTS_ENABLED": "0"})
+    def test_health_experts_disabled_when_flag_off(self):
         from fastapi.testclient import TestClient
         from api.main import app
         with TestClient(app) as c:
@@ -178,6 +179,18 @@ class TestAPIWithFlag:
         assert "experts" in data
         assert data["experts"]["enabled"] is False
 
+    @patch.dict(os.environ, {"EXPERTS_ENABLED": "1"})
+    def test_health_experts_enabled_when_flag_on(self):
+        from fastapi.testclient import TestClient
+        from api.main import app
+        with TestClient(app) as c:
+            r = c.get("/health")
+        assert r.status_code == 200
+        data = r.json()
+        assert "experts" in data
+        assert data["experts"]["enabled"] is True
+
+    @patch.dict(os.environ, {"EXPERTS_ENABLED": "0"})
     def test_score_experts_disabled_returns_null_decision(self):
         from fastapi.testclient import TestClient
         from api.main import app

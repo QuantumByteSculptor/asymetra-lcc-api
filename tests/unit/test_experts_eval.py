@@ -79,8 +79,8 @@ class TestExpertBundleLoader:
 
     def test_bundle_cols_count(self, expert_bundles):
         for name, b in expert_bundles.items():
-            assert len(b["cols"]) == 91, (
-                f"Bundle '{name}' has {len(b['cols'])} cols, expected 91"
+            assert len(b["cols"]) == 97, (
+                f"Bundle '{name}' has {len(b['cols'])} cols, expected 97 (v4.2)"
             )
 
     def test_sup_bin_has_model_and_thresholds(self, expert_bundles):

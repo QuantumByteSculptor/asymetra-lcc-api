@@ -24,15 +24,17 @@ from features import (
 
 class TestColumnCounts:
     def test_numeric_base_count(self):
-        assert len(NUMERIC_BASE) == 33
+        # v4.2 added corr_spy, beta_market, vix_level (+3 → 36)
+        assert len(NUMERIC_BASE) == 36
 
     def test_derived_count(self):
-        assert len(DERIVED) == 22
+        # v4.2 added corr_spy_sq, beta_abs, vix_vol_interaction (+3 → 25)
+        assert len(DERIVED) == 25
 
     def test_total_columns(self):
         cols = vector_columns(DEFAULT_CONFIG)
-        # 33 numeric + 22 derived + 6 asset_types + 30 markets = 91
-        assert len(cols) == 91
+        # 36 numeric + 25 derived + 6 asset_types + 30 markets = 97
+        assert len(cols) == 97
 
     def test_version_v2(self):
         assert DEFAULT_CONFIG.version == "v2"
@@ -46,9 +48,19 @@ class TestColumnCounts:
         for f in new_v2:
             assert f in NUMERIC_BASE, f"{f} missing from NUMERIC_BASE"
 
+    def test_v42_features_in_numeric_base(self):
+        """v4.2 market-context features."""
+        for f in ("corr_spy", "beta_market", "vix_level"):
+            assert f in NUMERIC_BASE, f"{f} missing from NUMERIC_BASE"
+
     def test_new_derived_features(self):
         assert "downside_div_vol" in DERIVED
         assert "worst_5d_vs_var99" in DERIVED
+
+    def test_v42_derived_features(self):
+        """v4.2 derived market-context features."""
+        for f in ("corr_spy_sq", "beta_abs", "vix_vol_interaction"):
+            assert f in DERIVED, f"{f} missing from DERIVED"
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +142,35 @@ class TestComputeDerived:
         }
         derived = compute_derived(feats)
         assert not math.isfinite(derived["recovery_per_dd_dur"])
+
+    # v4.2 market-context derived features
+    def test_corr_spy_sq(self):
+        feats: Dict[str, Any] = {"corr_spy": 0.8, "vol_ann": 0.2, "vix_level": 20.0}
+        derived = compute_derived(feats)
+        assert abs(derived["corr_spy_sq"] - 0.64) < 1e-9
+
+    def test_beta_abs(self):
+        feats: Dict[str, Any] = {"beta_market": -1.3}
+        derived = compute_derived(feats)
+        assert abs(derived["beta_abs"] - 1.3) < 1e-9
+
+    def test_vix_vol_interaction(self):
+        feats: Dict[str, Any] = {"vix_level": 20.0, "vol_ann": 0.25}
+        derived = compute_derived(feats)
+        assert abs(derived["vix_vol_interaction"] - 5.0) < 1e-9
+
+    def test_v42_nan_when_missing(self):
+        """NaN propagation for missing v4.2 inputs."""
+        derived = compute_derived({})
+        assert not math.isfinite(derived["corr_spy_sq"])
+        assert not math.isfinite(derived["beta_abs"])
+        assert not math.isfinite(derived["vix_vol_interaction"])
+
+    def test_corr_mkt_fallback_for_corr_spy(self):
+        """corr_spy_sq uses corr_mkt if corr_spy absent."""
+        feats: Dict[str, Any] = {"corr_mkt": 0.5}
+        derived = compute_derived(feats)
+        assert abs(derived["corr_spy_sq"] - 0.25) < 1e-9
 
 
 # ---------------------------------------------------------------------------

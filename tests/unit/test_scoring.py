@@ -44,7 +44,7 @@ class TestLoadExpertBundle:
         bundle = load_expert_bundle("equity")
         assert bundle is not None
         assert "cols" in bundle
-        assert len(bundle["cols"]) == 91
+        assert len(bundle["cols"]) == 97  # v4.2: 97 features (was 91)
 
     def test_fallback_to_global(self):
         """Unknown asset_type falls back to global bundle."""
