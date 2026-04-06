@@ -111,7 +111,19 @@ DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True
 # =============================
 # FastAPI
 # =============================
-app = FastAPI(title="Asymetra LCC API", version="1.8.8")
+app = FastAPI(title="Asymetra LCC API", version="1.8.9")
+
+
+@app.on_event("startup")
+async def _startup():
+    """Eagerly preload expert bundles so /health shows them immediately."""
+    if _EXPERTS_AVAILABLE:
+        try:
+            _preload_experts()
+            logger.info("startup: expert bundles preloaded — %s", list_loaded_experts())
+        except Exception as exc:
+            logger.warning("startup: preload_experts failed — %s", exc)
+
 
 # ✅ UN SEUL exception handler global (avec error_id)
 @app.exception_handler(Exception)
