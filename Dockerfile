@@ -32,6 +32,8 @@ COPY models /app/models
 ENV PORT=8000
 ENV UNSUP_BUNDLE_PATH=/app/models/unsup_bundle.joblib
 ENV SUP_BUNDLE_PATH=/app/models/sup_bundle.joblib
+ENV EXPERTS_DIR=/app/models/experts
+ENV EXPERTS_ENABLED=1
 
 # ============================
 # Start API
