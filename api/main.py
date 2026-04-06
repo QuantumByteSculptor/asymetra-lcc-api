@@ -216,7 +216,7 @@ def _load_sup() -> Dict[str, Any]:
         try:
             _SUP = joblib.load(p)
         except Exception as e:
-            print(f"[SUP] failed to load {p}: {type(e).__name__}: {e} -> disabling XGB shadow")
+            logger.error("[SUP] failed to load %s: %s: %s -> disabling XGB shadow", p, type(e).__name__, e)
             _SUP = {}
     return _SUP
 
@@ -756,7 +756,7 @@ def _oracle_compute_from_closes(
         "missing_pct": missing_pct,
         "tuw_pct": 95.0,
         "tail_obs_99": tail_obs_99,
-        "rsi": float(_rsi(closes)) if len(closes) >= 20 else None,
+        "rsi": (lambda v: float(v) if np.isfinite(v) else None)(_rsi(closes)) if len(closes) >= 20 else None,
         "corr_mkt": 0.0,
         "skew": _f(skew),
         "kurtosis_excess": _f(kurt_excess),
@@ -1002,24 +1002,18 @@ def _unsup_score(feats: Dict[str, Any]) -> Dict[str, Any]:
         try:
             X = imputer.transform(X)
         except Exception as e:
-            logger.warning(f"[UNSUP] imputer.transform failed -> fallback nan-median. err={e!r}")
-            if np.isnan(X).any():
+            logger.warning(f"[UNSUP] imputer.transform failed -> fallback training-medians. err={e!r}")
+            # Use training-set medians stored in bundle, not raw-data nanmedian (single-row = useless)
+            stats = np.asarray(imputer_block.get("statistics") or [], dtype=float)
+            if len(stats) == X.shape[1] and np.isnan(X).any():
                 for j in range(X.shape[1]):
-                    col = X[:, j]
-                    if np.all(np.isnan(col)):
-                        X[:, j] = 0.0
-                    else:
-                        med = np.nanmedian(col)
-                        X[np.isnan(col), j] = med
+                    if np.isnan(X[0, j]):
+                        X[0, j] = stats[j] if np.isfinite(stats[j]) else 0.0
+            elif np.isnan(X).any():
+                X = np.where(np.isnan(X), 0.0, X)
     else:
         if np.isnan(X).any():
-            for j in range(X.shape[1]):
-                col = X[:, j]
-                if np.all(np.isnan(col)):
-                    X[:, j] = 0.0
-                else:
-                    med = np.nanmedian(col)
-                    X[np.isnan(col), j] = med
+            X = np.where(np.isnan(X), 0.0, X)
 
     raw_if = float(np.asarray(iforest.score_samples(X), dtype=float)[0])
     raw_lof = float(np.asarray(lof.score_samples(X), dtype=float)[0])
@@ -1127,10 +1121,12 @@ def _xgb_shadow_score(feats: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         inv = (sup.get("labels") or {}).get("inv") or {0: "ok", 1: "warn", 2: "block"}
         pred = str(inv.get(pred_i, "ok")).upper()
 
+        if len(proba) < 3:
+            return None  # model not trained as 3-class; skip shadow score
         return {"pred": pred, "probs": {"OK": float(proba[0]), "WARN": float(proba[1]), "BLOCK": float(proba[2])}}
 
     except Exception as e:
-        print(f"[XGB] shadow error: {type(e).__name__}: {e}")
+        logger.warning("[XGB] shadow error: %s: %s", type(e).__name__, e)
         return None
 
 
