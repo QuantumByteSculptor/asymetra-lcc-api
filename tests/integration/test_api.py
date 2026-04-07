@@ -100,8 +100,9 @@ class TestScore:
         assert "expert_loaded" in data
 
     def test_score_experts_disabled_returns_null(self, client, base_feats):
-        """With default EXPERTS_ENABLED=0, expert_decision is null."""
-        data = client.post("/score", json=base_feats).json()
+        """With EXPERTS_ENABLED=0 patched, expert_decision is null."""
+        with patch("api.scoring.is_experts_enabled", return_value=False):
+            data = client.post("/score", json=base_feats).json()
         assert data["expert_decision"] is None
         assert data["expert_loaded"] is False
 

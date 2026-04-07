@@ -139,9 +139,9 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
 # Pydantic Models
 # =============================
 class ScoreRequest(BaseModel):
-    asset_type: str = Field(..., examples=["equity", "etf", "fx", "commodity", "index"])
-    market: str = Field(..., examples=["US", "EU", "ASIA", "OCE", "GLOBAL"])
-    ticker: Optional[str] = None
+    asset_type: str = Field(..., examples=["equity", "etf", "fx", "commodity", "index"], max_length=32)
+    market: str = Field(..., examples=["US", "EU", "ASIA", "OCE", "GLOBAL"], max_length=32)
+    ticker: Optional[str] = Field(default=None, max_length=20)
 
     # engineered stats (Lovable may send some or all)
     vol_ann: Optional[float] = None
@@ -162,20 +162,20 @@ class ScoreRequest(BaseModel):
 
 
 class OracleRequest(BaseModel):
-    asset_type: str = Field(..., examples=["equity", "etf", "fx", "commodity", "index"])
-    market: str = Field(..., examples=["US", "EU", "ASIA", "OCE", "GLOBAL"])
-    ticker: Optional[str] = Field(default=None, description="If provided, Oracle can download data via yfinance/stooq.")
-    closes: Optional[List[float]] = None
-    dates: Optional[List[str]] = None
-    lookback_days: int = 252
+    asset_type: str = Field(..., examples=["equity", "etf", "fx", "commodity", "index"], max_length=32)
+    market: str = Field(..., examples=["US", "EU", "ASIA", "OCE", "GLOBAL"], max_length=32)
+    ticker: Optional[str] = Field(default=None, description="If provided, Oracle can download data via yfinance/stooq.", max_length=20)
+    closes: Optional[List[float]] = Field(default=None, max_length=2000)
+    dates: Optional[List[str]] = Field(default=None, max_length=2000)
+    lookback_days: int = Field(default=252, ge=10, le=756)
 
 
 class ScoreOracleRequest(BaseModel):
     lovable: ScoreRequest
-    closes: Optional[List[float]] = None
-    dates: Optional[List[str]] = None
+    closes: Optional[List[float]] = Field(default=None, max_length=2000)
+    dates: Optional[List[str]] = Field(default=None, max_length=2000)
     force_oracle: bool = False
-    lookback_days: int = 252
+    lookback_days: int = Field(default=252, ge=10, le=756)
 
 
 # =============================
@@ -698,6 +698,50 @@ def _stress_var(returns: np.ndarray, base_var99: Optional[float], window: int = 
 # =========================
 # api/main.py  (PARTIE 2/2)
 # =========================
+
+# ---------------------------------------------------------------------------
+# Market context: corr_spy, beta_market, vix_level (live via yfinance, cached 1h)
+# ---------------------------------------------------------------------------
+_MARKET_CONTEXT_CACHE = {}
+_MARKET_CONTEXT_CACHE_TS = 0.0
+_MARKET_CONTEXT_CACHE_TTL = 3600.0
+
+
+def _compute_market_context(closes, lookback=60):
+    """Return corr_spy, beta_market, vix_level from live SPY/VIX data (cached 1h)."""
+    import time
+    global _MARKET_CONTEXT_CACHE, _MARKET_CONTEXT_CACHE_TS
+    out = {'corr_spy': None, 'beta_market': None, 'vix_level': None}
+    try:
+        now = time.time()
+        if now - _MARKET_CONTEXT_CACHE_TS > _MARKET_CONTEXT_CACHE_TTL or not _MARKET_CONTEXT_CACHE:
+            spy_raw = yf.download('SPY', period='6mo', auto_adjust=True, progress=False)['Close'].squeeze()
+            vix_raw = yf.download('^VIX', period='6mo', auto_adjust=True, progress=False)['Close'].squeeze()
+            _MARKET_CONTEXT_CACHE.update({'spy': spy_raw, 'vix': vix_raw})
+            _MARKET_CONTEXT_CACHE_TS = now
+            logger.info('market_context: refreshed SPY/VIX cache (%d bars)', len(spy_raw))
+        spy = _MARKET_CONTEXT_CACHE.get('spy', pd.Series(dtype=float))
+        vix = _MARKET_CONTEXT_CACHE.get('vix', pd.Series(dtype=float))
+        if len(vix) > 0:
+            out['vix_level'] = float(vix.iloc[-1])
+        if len(spy) < lookback or len(closes) < lookback:
+            return out
+        spy_ret = spy.pct_change().dropna()
+        asset_ret = pd.Series(closes).pct_change().dropna()
+        aligned = pd.DataFrame({'spy': spy_ret, 'asset': asset_ret}).dropna().tail(lookback)
+        if len(aligned) < 20:
+            return out
+        corr = float(aligned['asset'].corr(aligned['spy']))
+        cov = float(aligned['asset'].cov(aligned['spy']))
+        var_spy = float(aligned['spy'].var())
+        beta = cov / var_spy if var_spy > 1e-12 else None
+        out['corr_spy'] = corr if np.isfinite(corr) else None
+        out['beta_market'] = float(beta) if beta is not None and np.isfinite(beta) else None
+    except Exception as exc:
+        logger.warning('market_context: failed (%s: %s)', type(exc).__name__, exc)
+    return out
+
+
 def _oracle_compute_from_closes(
     asset_type: str,
     market: str,
@@ -750,7 +794,7 @@ def _oracle_compute_from_closes(
     def _f(x: float) -> Optional[float]:
         return float(x) if np.isfinite(x) else None
 
-    return {
+    feats: Dict[str, Any] = {
         "asset_type": asset_type,
         "market": market,
         "ticker": ticker,
@@ -788,6 +832,13 @@ def _oracle_compute_from_closes(
         "worst_20d_ret": _f(worst_20d_ret),
         "autocorr_1": _f(autocorr_1),
     }
+    # Inject live market context (corr_spy, beta_market, vix_level)
+    try:
+        mkt = _compute_market_context(closes)
+        feats.update({k: v for k, v in mkt.items() if v is not None})
+    except Exception as _mkt_exc:
+        logger.debug("market_context inject skipped: %s", _mkt_exc)
+    return feats
 
 
 def _oracle_analyze(req: OracleRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]:

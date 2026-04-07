@@ -16,166 +16,171 @@
   },
   "expert_v2": {
     "bundles": [
+      "crypto",
       "equity",
       "etf",
       "global"
     ],
     "thresholds": {
+      "crypto": {
+        "t_lo": 0.818,
+        "t_hi": 0.8393
+      },
       "equity": {
-        "t_lo": 0.6682,
-        "t_hi": 0.8531
+        "t_lo": 0.5455,
+        "t_hi": 0.7899
       },
       "etf": {
-        "t_lo": 0.2216,
-        "t_hi": 0.7615
+        "t_lo": 0.2565,
+        "t_hi": 0.7284
       },
       "global": {
-        "t_lo": 0.6221,
-        "t_hi": 0.8588
+        "t_lo": 0.5424,
+        "t_hi": 0.8034
       }
     },
     "global": {
       "n": 3685,
-      "accuracy": 0.598643,
-      "balanced_accuracy": 0.464712,
-      "macro_f1": 0.452633,
-      "fp_rate_ok": 0.107393,
-      "recall_non_ok": 0.527035,
-      "roc_auc": 0.81448,
-      "pr_auc": 0.796681,
-      "ece": 0.032836,
+      "accuracy": 0.58209,
+      "balanced_accuracy": 0.414427,
+      "macro_f1": 0.372336,
+      "fp_rate_ok": 0.05045,
+      "recall_non_ok": 0.387998,
+      "roc_auc": 0.782068,
+      "pr_auc": 0.770227,
+      "ece": 0.123329,
       "per_class": {
         "ok": {
-          "precision": 0.6918,
-          "recall": 0.8926,
-          "f1": 0.7795,
+          "precision": 0.6486,
+          "recall": 0.9496,
+          "f1": 0.7707,
           "support": 2002
         },
         "warn": {
-          "precision": 0.3124,
-          "recall": 0.3555,
-          "f1": 0.3326,
+          "precision": 0.2957,
+          "recall": 0.2563,
+          "f1": 0.2746,
           "support": 827
         },
         "block": {
-          "precision": 0.7764,
-          "recall": 0.146,
-          "f1": 0.2458,
+          "precision": 0.8649,
+          "recall": 0.0374,
+          "f1": 0.0717,
           "support": 856
         }
       },
       "confusion_matrix": [
         [
-          1787,
-          213,
-          2
+          1901,
+          101,
+          0
         ],
         [
-          499,
-          294,
-          34
+          610,
+          212,
+          5
         ],
         [
-          297,
-          434,
-          125
+          420,
+          404,
+          32
         ]
       ]
     },
     "per_asset": {
       "equity": {
         "n": 2725,
-        "accuracy": 0.539083,
-        "balanced_accuracy": 0.445472,
-        "macro_f1": 0.422439,
-        "fp_rate_ok": 0.107941,
-        "recall_non_ok": 0.489496,
-        "roc_auc": 0.773393,
-        "pr_auc": 0.808025,
-        "ece": 0.030247,
+        "accuracy": 0.52367,
+        "balanced_accuracy": 0.416737,
+        "macro_f1": 0.362721,
+        "fp_rate_ok": 0.069391,
+        "recall_non_ok": 0.413165,
+        "roc_auc": 0.766866,
+        "pr_auc": 0.801297,
+        "ece": 0.121781,
         "per_class": {
           "ok": {
-            "precision": 0.6135,
-            "recall": 0.8921,
-            "f1": 0.727,
+            "precision": 0.5902,
+            "recall": 0.9306,
+            "f1": 0.7223,
             "support": 1297
           },
           "warn": {
-            "precision": 0.2911,
-            "recall": 0.2975,
-            "f1": 0.2942,
+            "precision": 0.2924,
+            "recall": 0.2769,
+            "f1": 0.2844,
             "support": 679
           },
           "block": {
-            "precision": 0.7586,
-            "recall": 0.1469,
-            "f1": 0.2461,
+            "precision": 0.8649,
+            "recall": 0.0427,
+            "f1": 0.0814,
             "support": 749
           }
         },
         "confusion_matrix": [
           [
-            1157,
-            138,
-            2
+            1207,
+            90,
+            0
           ],
           [
-            444,
-            202,
-            33
+            486,
+            188,
+            5
           ],
           [
-            285,
-            354,
-            110
+            352,
+            365,
+            32
           ]
         ]
       },
       "etf": {
         "n": 960,
-        "accuracy": 0.767708,
-        "balanced_accuracy": 0.551809,
-        "macro_f1": 0.536147,
-        "fp_rate_ok": 0.106383,
-        "recall_non_ok": 0.737255,
-        "roc_auc": 0.879299,
-        "pr_auc": 0.77427,
-        "ece": 0.08116,
+        "accuracy": 0.747917,
+        "balanced_accuracy": 0.382186,
+        "macro_f1": 0.362875,
+        "fp_rate_ok": 0.015603,
+        "recall_non_ok": 0.247059,
+        "roc_auc": 0.807092,
+        "pr_auc": 0.646406,
+        "ece": 0.127723,
         "per_class": {
           "ok": {
-            "precision": 0.9039,
-            "recall": 0.8936,
-            "f1": 0.8987,
+            "precision": 0.7833,
+            "recall": 0.9844,
+            "f1": 0.8724,
             "support": 705
           },
           "warn": {
-            "precision": 0.3725,
-            "recall": 0.6216,
-            "f1": 0.4658,
+            "precision": 0.3243,
+            "recall": 0.1622,
+            "f1": 0.2162,
             "support": 148
           },
           "block": {
-            "precision": 0.9375,
-            "recall": 0.1402,
-            "f1": 0.2439,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
             "support": 107
           }
         },
         "confusion_matrix": [
           [
-            630,
-            75,
+            694,
+            11,
             0
           ],
           [
-            55,
-            92,
-            1
+            124,
+            24,
+            0
           ],
           [
-            12,
-            80,
-            15
+            68,
+            39,
+            0
           ]
         ]
       }
@@ -236,54 +241,54 @@
   "comparison": {
     "accuracy": {
       "bin_sigmoid": 0.540027,
-      "expert_v2": 0.598643,
-      "delta": 0.058616
+      "expert_v2": 0.58209,
+      "delta": 0.042063
     },
     "balanced_accuracy": {
       "bin_sigmoid": 0.39781,
-      "expert_v2": 0.464712,
-      "delta": 0.066902
+      "expert_v2": 0.414427,
+      "delta": 0.016617
     },
     "macro_f1": {
       "bin_sigmoid": 0.34551,
-      "expert_v2": 0.452633,
-      "delta": 0.107123
+      "expert_v2": 0.372336,
+      "delta": 0.026826
     },
     "fp_rate_ok": {
       "bin_sigmoid": 0.146354,
-      "expert_v2": 0.107393,
-      "delta": -0.038961
+      "expert_v2": 0.05045,
+      "delta": -0.095904
     },
     "recall_non_ok": {
       "bin_sigmoid": 0.44801,
-      "expert_v2": 0.527035,
-      "delta": 0.079025
+      "expert_v2": 0.387998,
+      "delta": -0.060012
     },
     "roc_auc": {
       "bin_sigmoid": 0.763844,
-      "expert_v2": 0.81448,
-      "delta": 0.050636
+      "expert_v2": 0.782068,
+      "delta": 0.018224
     },
     "pr_auc": {
       "bin_sigmoid": 0.71853,
-      "expert_v2": 0.796681,
-      "delta": 0.078151
+      "expert_v2": 0.770227,
+      "delta": 0.051697
     },
     "ece": {
       "bin_sigmoid": 0.077974,
-      "expert_v2": 0.032836,
-      "delta": -0.045138
+      "expert_v2": 0.123329,
+      "delta": 0.045355
     }
   },
   "strengths": [
-    "ROC-AUC solide (0.814)",
-    "FP-rate OK respecté (0.107 ≤ 0.15)",
-    "Recall NON-OK atteint (0.527 ≥ 0.45)",
-    "Calibration OK (ECE=0.033)",
-    "Expert v2 bat bin_sigmoid en ROC-AUC (0.814 vs 0.764)"
+    "ROC-AUC solide (0.782)",
+    "FP-rate OK respecté (0.050 ≤ 0.15)",
+    "Expert v2 bat bin_sigmoid en ROC-AUC (0.782 vs 0.764)"
   ],
   "issues": [
-    "Experts manquants (→ fallback global): ['commodity', 'fx', 'crypto']"
+    "Recall NON-OK faible (0.388), cible 0.45",
+    "Calibration dégradée (ECE=0.123)",
+    "Experts manquants (→ fallback global): ['commodity', 'fx']"
   ],
   "verdict": "✅  DÉPLOYABLE (sous monitoring)",
   "verdict_detail": "Critères critiques respectés. Activer EXPERTS_ENABLED=1 en prod avec monitoring fp_rate + recall."

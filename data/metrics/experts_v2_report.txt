@@ -97,4 +97,4 @@
   Critères critiques respectés. Activer EXPERTS_ENABLED=1 en prod avec monitoring fp_rate + recall.
 ════════════════════════════════════════════════════════════════════
 
-  📄 JSON  → /tmp/eval_v42_holdout.json
+  📄 JSON  → data/metrics/experts_v2_report.json
