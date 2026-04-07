@@ -11,7 +11,9 @@ import sqlite3
 import io
 import sys
 import traceback
+import threading
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
@@ -25,7 +27,7 @@ import requests
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ------------------------------------------------------------------
 # Ensure repo root is on sys.path so we import local features.py
@@ -111,18 +113,48 @@ DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True
 # =============================
 # FastAPI
 # =============================
-app = FastAPI(title="Asymetra LCC API", version="1.8.9")
-
-
-@app.on_event("startup")
-async def _startup():
-    """Eagerly preload expert bundles so /health shows them immediately."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup: preload expert bundles so /health shows them immediately."""
     if _EXPERTS_AVAILABLE:
         try:
             _preload_experts()
             logger.info("startup: expert bundles preloaded — %s", list_loaded_experts())
         except Exception as exc:
             logger.warning("startup: preload_experts failed — %s", exc)
+    yield
+
+
+app = FastAPI(title="Asymetra LCC API", version="1.9.0", lifespan=lifespan)
+
+
+# =============================
+# In-memory metrics (thread-safe)
+# =============================
+_METRICS_LOCK = threading.Lock()
+_METRICS: Dict[str, Any] = {
+    "calls_score": 0,
+    "calls_score_oracle": 0,
+    "statuses": {"OK": 0, "WARN": 0, "BLOCK": 0},
+    "scores": [],          # kept in memory (capped at 10000)
+    "expert_non_null": 0,
+}
+_METRICS_SCORES_CAP = 10_000
+
+
+def _record_metric(endpoint: str, status: str, score: Optional[float], has_expert: bool) -> None:
+    with _METRICS_LOCK:
+        if endpoint == "score":
+            _METRICS["calls_score"] += 1
+        else:
+            _METRICS["calls_score_oracle"] += 1
+        s = (status or "OK").upper()
+        if s in _METRICS["statuses"]:
+            _METRICS["statuses"][s] += 1
+        if score is not None and len(_METRICS["scores"]) < _METRICS_SCORES_CAP:
+            _METRICS["scores"].append(float(score))
+        if has_expert:
+            _METRICS["expert_non_null"] += 1
 
 
 # ✅ UN SEUL exception handler global (avec error_id)
@@ -138,6 +170,11 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
 # =============================
 # Pydantic Models
 # =============================
+_VALID_ASSET_TYPES = {"equity", "etf", "fx", "crypto", "commodity", "global", "index"}
+import re as _re
+_TICKER_RE = _re.compile(r"^[A-Z0-9.\-\^]{1,20}$")
+
+
 class ScoreRequest(BaseModel):
     asset_type: str = Field(..., examples=["equity", "etf", "fx", "commodity", "index"], max_length=32)
     market: str = Field(..., examples=["US", "EU", "ASIA", "OCE", "GLOBAL"], max_length=32)
@@ -160,6 +197,28 @@ class ScoreRequest(BaseModel):
 
     model_config = {"extra": "allow"}  # accept extra fields
 
+    @field_validator("asset_type")
+    @classmethod
+    def validate_asset_type(cls, v: str) -> str:
+        normalized = v.strip().lower()
+        if normalized not in _VALID_ASSET_TYPES:
+            raise ValueError(
+                f"asset_type '{v}' invalide. Valeurs acceptées: {sorted(_VALID_ASSET_TYPES)}"
+            )
+        return v
+
+    @field_validator("ticker")
+    @classmethod
+    def validate_ticker(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        upper = v.strip().upper()
+        if not _TICKER_RE.match(upper):
+            raise ValueError(
+                f"ticker '{v}' invalide. Format attendu: ^[A-Z0-9.\\-\\^]{{1,20}}$"
+            )
+        return v
+
 
 class OracleRequest(BaseModel):
     asset_type: str = Field(..., examples=["equity", "etf", "fx", "commodity", "index"], max_length=32)
@@ -168,6 +227,28 @@ class OracleRequest(BaseModel):
     closes: Optional[List[float]] = Field(default=None, max_length=2000)
     dates: Optional[List[str]] = Field(default=None, max_length=2000)
     lookback_days: int = Field(default=252, ge=10, le=756)
+
+    @field_validator("asset_type")
+    @classmethod
+    def validate_asset_type(cls, v: str) -> str:
+        normalized = v.strip().lower()
+        if normalized not in _VALID_ASSET_TYPES:
+            raise ValueError(
+                f"asset_type '{v}' invalide. Valeurs acceptées: {sorted(_VALID_ASSET_TYPES)}"
+            )
+        return v
+
+    @field_validator("ticker")
+    @classmethod
+    def validate_ticker(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        upper = v.strip().upper()
+        if not _TICKER_RE.match(upper):
+            raise ValueError(
+                f"ticker '{v}' invalide. Format attendu: ^[A-Z0-9.\\-\\^]{{1,20}}$"
+            )
+        return v
 
 
 class ScoreOracleRequest(BaseModel):
@@ -1269,7 +1350,45 @@ def root() -> Dict[str, Any]:
         "ok": True,
         "service": "asymetra-lcc-api",
         "version": app.version,
-        "hint": "Use /health, /score, /score_oracle, /oracle/analyze",
+        "hint": "Use /health, /metrics, /score, /score_oracle, /oracle/analyze",
+    }
+
+
+@app.get("/metrics")
+def metrics() -> Dict[str, Any]:
+    """Statistiques agrégées des appels depuis le démarrage du serveur."""
+    with _METRICS_LOCK:
+        calls_score = _METRICS["calls_score"]
+        calls_oracle = _METRICS["calls_score_oracle"]
+        total = calls_score + calls_oracle
+        statuses = dict(_METRICS["statuses"])
+        scores = list(_METRICS["scores"])
+        expert_non_null = _METRICS["expert_non_null"]
+
+    status_pct: Dict[str, Any] = {}
+    if total > 0:
+        status_pct = {k: round(v / total * 100, 1) for k, v in statuses.items()}
+
+    score_stats: Dict[str, Any] = {}
+    if scores:
+        arr = np.array(scores, dtype=float)
+        score_stats = {
+            "mean": round(float(arr.mean()), 4),
+            "median": round(float(np.median(arr)), 4),
+            "std": round(float(arr.std()), 4),
+            "min": round(float(arr.min()), 4),
+            "max": round(float(arr.max()), 4),
+            "n": len(scores),
+        }
+
+    return {
+        "calls_score": calls_score,
+        "calls_score_oracle": calls_oracle,
+        "calls_total": total,
+        "status_counts": statuses,
+        "status_pct": status_pct,
+        "score_stats": score_stats,
+        "expert_non_null_calls": expert_non_null,
     }
 
 
@@ -1409,6 +1528,12 @@ def score(req: ScoreRequest, x_api_key: Optional[str] = Header(default=None, ali
         resp["expert_decision"] = None
         resp["expert_loaded"] = False
 
+    _record_metric(
+        endpoint="score",
+        status=str(u.get("status") or "OK"),
+        score=u.get("ensemble"),
+        has_expert=bool(resp.get("expert_decision") is not None),
+    )
     return jsonable_encoder(resp)
 
 
@@ -1714,6 +1839,12 @@ def score_oracle(
         out["expert_decision"] = None
         out["expert_loaded"] = False
 
+    _record_metric(
+        endpoint="score_oracle",
+        status=str(unsup_status_final or "OK"),
+        score=(unsup_final or unsup_pre).get("ensemble"),
+        has_expert=bool(out.get("expert_decision") is not None),
+    )
     return jsonable_encoder(out)
 
 
