@@ -189,3 +189,123 @@ class TestScoreOracle:
         }
         r = client.post("/score_oracle", json=payload)
         assert r.status_code == 200  # must not raise 500
+
+
+# ---------------------------------------------------------------------------
+# /metrics — model_3m block
+# ---------------------------------------------------------------------------
+
+class TestMetrics:
+    def test_metrics_returns_200(self, client):
+        r = client.get("/metrics")
+        assert r.status_code == 200
+
+    def test_metrics_has_model_3m(self, client):
+        data = client.get("/metrics").json()
+        assert "model_3m" in data
+        m = data["model_3m"]
+        assert m["model_version"] == "3m_v1"
+        assert m["feature_count"] == 30
+        assert isinstance(m["backtest_cagr"], float)
+        assert isinstance(m["backtest_sharpe"], float)
+
+    def test_metrics_has_call_counts(self, client):
+        data = client.get("/metrics").json()
+        assert "calls_total" in data
+        assert isinstance(data["calls_total"], int)
+
+
+# ---------------------------------------------------------------------------
+# /score_3m
+# ---------------------------------------------------------------------------
+
+def _make_stock(ticker: str = "AAPL") -> dict:
+    """Minimal valid stock feature dict for /score_3m."""
+    return {
+        "ticker":         ticker,
+        "ret_1m":         0.02,
+        "ret_3m":         0.05,
+        "ret_6m":         0.10,
+        "ret_12m":        0.18,
+        "mom_12_1":       0.16,
+        "ret_12m_vs_spy": 0.05,
+        "vol_ann":        0.22,
+        "vol_ratio":      1.1,
+        "dd_from_hi52":   -0.08,
+        "above_200ma":    1.0,
+        "trend_strength": 0.6,
+        "gross_margin":   0.40,
+        "op_margin":      0.20,
+        "net_margin":     0.18,
+        "roe":            0.15,
+        "debt_to_equity": 0.5,
+        "rd_intensity":   0.05,
+        "fcf_margin":     0.15,
+        "revenue_growth": 0.12,
+        "ni_growth":      0.10,
+        "pe_ratio":       22.0,
+        "pb_ratio":       4.0,
+        "earnings_yield": 0.045,
+        "ev_to_revenue":  5.0,
+        "accruals_ratio": -0.02,
+        "asset_growth":   0.08,
+        "current_ratio":  2.1,
+        "ret_1m_lag":     0.01,
+        "skew_6m":        -0.2,
+        "sector_id":      10.0,
+    }
+
+
+class TestScore3m:
+    def test_score_3m_returns_200(self, client):
+        payload = {"stocks": [_make_stock("AAPL"), _make_stock("MSFT")]}
+        r = client.post("/score_3m", json=payload)
+        assert r.status_code == 200
+
+    def test_score_3m_has_model_version(self, client):
+        payload = {"stocks": [_make_stock()]}
+        data = client.post("/score_3m", json=payload).json()
+        assert data.get("model_version") == "3m_v1"
+
+    def test_score_3m_has_scores(self, client):
+        payload = {"stocks": [_make_stock("AAPL"), _make_stock("MSFT")]}
+        data = client.post("/score_3m", json=payload).json()
+        assert "scores" in data
+        assert len(data["scores"]) == 2
+        for s in data["scores"]:
+            assert "prob_beat_spy_3m" in s
+            assert "top_pick" in s
+            assert 0.0 <= s["prob_beat_spy_3m"] <= 1.0
+
+    def test_score_3m_top_pick_count(self, client):
+        stocks = [_make_stock(f"T{i:03d}") for i in range(20)]
+        payload = {"stocks": stocks, "top_pct": 0.10}
+        data = client.post("/score_3m", json=payload).json()
+        n_top = sum(1 for s in data["scores"] if s["top_pick"])
+        assert n_top == data["n_top_picks"]
+        assert n_top >= 1
+
+    def test_score_3m_has_summary(self, client):
+        payload = {"stocks": [_make_stock() for _ in range(5)]}
+        data = client.post("/score_3m", json=payload).json()
+        assert "summary" in data
+        s = data["summary"]
+        for key in ["prob_mean", "prob_median", "prob_p90", "prob_min", "prob_max"]:
+            assert key in s
+
+    def test_score_3m_with_missing_features(self, client):
+        """Model should impute missing features — no crash."""
+        payload = {"stocks": [{"ticker": "AAPL", "ret_1m": 0.02, "vol_ann": 0.22}]}
+        r = client.post("/score_3m", json=payload)
+        assert r.status_code == 200
+        data = r.json()
+        assert data["scores"][0]["prob_beat_spy_3m"] >= 0.0
+
+    def test_score_3m_n_stocks_field(self, client):
+        stocks = [_make_stock(f"X{i}") for i in range(10)]
+        data = client.post("/score_3m", json={"stocks": stocks}).json()
+        assert data["n_stocks"] == 10
+
+    def test_score_3m_empty_payload_rejected(self, client):
+        r = client.post("/score_3m", json={"stocks": []})
+        assert r.status_code == 422  # validation error

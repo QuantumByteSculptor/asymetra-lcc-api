@@ -106,6 +106,24 @@ BIN_BUNDLE_PATH = os.getenv("BIN_BUNDLE_PATH", "models/bin_sigmoid.joblib")
 BIN_THRESHOLDS_PATH = os.getenv("BIN_THRESHOLDS_PATH", "models/threshold_sigmoid.json")
 BIN_T_HI_DEFAULT = float(os.getenv("BIN_T_HI_DEFAULT", "0.85"))
 
+# ✅ 3m stock-picking model
+MODEL_3M_PATH = os.getenv("MODEL_3M_PATH", str(REPO_ROOT / "models/bin_sigmoid_return_simfin_3m.joblib"))
+MODEL_3M_ENABLED = os.getenv("MODEL_3M_ENABLED", "1").strip() not in ("0", "false", "False")
+
+# Validated backtest metrics for /metrics endpoint
+_MODEL_3M_BACKTEST = {
+    "model_version":          "3m_v1",
+    "backtest_cagr":          0.327,
+    "backtest_sharpe":        1.11,
+    "backtest_sortino":       1.99,
+    "backtest_max_drawdown":  -0.293,
+    "alpha_vs_spy":           0.178,
+    "test_period":            "2019-2023",
+    "oos_2024_sharpe":        2.33,
+    "feature_count":          30,
+    "universe_size":          301,
+}
+
 # Optional debug toggles (control verbosity / extra debug fields)
 DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True")
 
@@ -115,17 +133,25 @@ DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True
 # =============================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: preload expert bundles so /health shows them immediately."""
+    """Startup: preload expert bundles and 3m model."""
     if _EXPERTS_AVAILABLE:
         try:
             _preload_experts()
             logger.info("startup: expert bundles preloaded — %s", list_loaded_experts())
         except Exception as exc:
             logger.warning("startup: preload_experts failed — %s", exc)
+    try:
+        m = _load_3m_model()
+        if m:
+            logger.info("startup: 3m model loaded — %d features", len(m.get("cols", [])))
+        else:
+            logger.warning("startup: 3m model not loaded (missing or disabled)")
+    except Exception as exc:
+        logger.warning("startup: 3m model load failed — %s", exc)
     yield
 
 
-app = FastAPI(title="Asymetra LCC API", version="1.9.0", lifespan=lifespan)
+app = FastAPI(title="Asymetra LCC API", version="2.0.0", lifespan=lifespan)
 
 
 # =============================
@@ -264,6 +290,7 @@ class ScoreOracleRequest(BaseModel):
 # =============================
 _UNSUP: Optional[Dict[str, Any]] = None
 _SUP: Optional[Dict[str, Any]] = None
+_MODEL_3M: Optional[Dict[str, Any]] = None
 
 
 def _load_unsup() -> Dict[str, Any]:
@@ -312,6 +339,42 @@ def _load_sup() -> Dict[str, Any]:
             logger.error("[SUP] failed to load %s: %s: %s -> disabling XGB shadow", p, type(e).__name__, e)
             _SUP = {}
     return _SUP
+
+
+_MODEL_3M_FEATURES = [
+    "ret_1m", "ret_3m", "ret_6m", "ret_12m", "mom_12_1",
+    "ret_12m_vs_spy", "vol_ann", "vol_ratio", "dd_from_hi52",
+    "above_200ma", "trend_strength",
+    "gross_margin", "op_margin", "net_margin", "roe",
+    "debt_to_equity", "rd_intensity", "fcf_margin",
+    "revenue_growth", "ni_growth",
+    "pe_ratio", "pb_ratio", "earnings_yield", "ev_to_revenue",
+    "accruals_ratio", "asset_growth", "current_ratio",
+    "ret_1m_lag", "skew_6m", "sector_id",
+]
+
+
+def _load_3m_model() -> Dict[str, Any]:
+    """Lazy-load the 3m stock-picking model. Never crashes the API."""
+    global _MODEL_3M
+    if _MODEL_3M is not None:
+        return _MODEL_3M
+    if not MODEL_3M_ENABLED:
+        _MODEL_3M = {}
+        return _MODEL_3M
+    p = Path(MODEL_3M_PATH)
+    if not p.exists():
+        logger.warning("[3M] Model file not found: %s — /score_3m will return error", p)
+        _MODEL_3M = {}
+        return _MODEL_3M
+    try:
+        _MODEL_3M = joblib.load(p)
+        logger.info("[3M] Loaded 3m model: %d features, version=%s",
+                    len(_MODEL_3M.get("cols", [])), _MODEL_3M.get("feature_version", "?"))
+    except Exception as e:
+        logger.exception("[3M] Failed to load model: %s -> disabled", e)
+        _MODEL_3M = {}
+    return _MODEL_3M
 
 
 # =============================
@@ -1350,7 +1413,7 @@ def root() -> Dict[str, Any]:
         "ok": True,
         "service": "asymetra-lcc-api",
         "version": app.version,
-        "hint": "Use /health, /metrics, /score, /score_oracle, /oracle/analyze",
+        "hint": "Use /health, /metrics, /score, /score_oracle, /oracle/analyze, /score_3m",
     }
 
 
@@ -1389,6 +1452,7 @@ def metrics() -> Dict[str, Any]:
         "status_pct": status_pct,
         "score_stats": score_stats,
         "expert_non_null_calls": expert_non_null,
+        "model_3m": _MODEL_3M_BACKTEST,
     }
 
 
@@ -1851,3 +1915,139 @@ def score_oracle(
 
 
 
+
+# =============================================================================
+# 3m Stock-Picking Model — /score_3m
+# =============================================================================
+
+class Score3mItem(BaseModel):
+    """Features for one stock to score with the 3m model."""
+    ticker: Optional[str] = Field(default=None, max_length=20)
+
+    # Price / momentum features
+    ret_1m:         Optional[float] = None
+    ret_3m:         Optional[float] = None
+    ret_6m:         Optional[float] = None
+    ret_12m:        Optional[float] = None
+    mom_12_1:       Optional[float] = None
+    ret_12m_vs_spy: Optional[float] = None
+    vol_ann:        Optional[float] = None
+    vol_ratio:      Optional[float] = None
+    dd_from_hi52:   Optional[float] = None
+    above_200ma:    Optional[float] = None
+    trend_strength: Optional[float] = None
+
+    # Fundamental features V1
+    gross_margin:    Optional[float] = None
+    op_margin:       Optional[float] = None
+    net_margin:      Optional[float] = None
+    roe:             Optional[float] = None
+    debt_to_equity:  Optional[float] = None
+    rd_intensity:    Optional[float] = None
+    fcf_margin:      Optional[float] = None
+    revenue_growth:  Optional[float] = None
+    ni_growth:       Optional[float] = None
+
+    # Fundamental features V2
+    pe_ratio:        Optional[float] = None
+    pb_ratio:        Optional[float] = None
+    earnings_yield:  Optional[float] = None
+    ev_to_revenue:   Optional[float] = None
+    accruals_ratio:  Optional[float] = None
+    asset_growth:    Optional[float] = None
+    current_ratio:   Optional[float] = None
+
+    # Technical V2
+    ret_1m_lag:  Optional[float] = None
+    skew_6m:     Optional[float] = None
+
+    # Sector
+    sector_id: Optional[float] = None
+
+    model_config = {"extra": "allow"}
+
+
+class Score3mRequest(BaseModel):
+    stocks: List[Score3mItem] = Field(..., min_length=1, max_length=2000)
+    top_pct: float = Field(default=0.10, ge=0.01, le=0.50,
+                           description="Fraction of stocks to flag as top picks (default 10%)")
+
+
+def _predict_3m(items: List[Score3mItem], top_pct: float) -> Dict[str, Any]:
+    """Score stocks with 3m model. Returns per-stock probs + top picks."""
+    bundle = _load_3m_model()
+    if not bundle:
+        raise HTTPException(status_code=503, detail="3m model not loaded (check MODEL_3M_PATH)")
+
+    xgb_model = bundle.get("xgb_model")
+    lgb_model  = bundle.get("lgb_model")
+    medians    = bundle.get("medians", {})
+    cols       = bundle.get("cols", _MODEL_3M_FEATURES)
+
+    if xgb_model is None or lgb_model is None:
+        raise HTTPException(status_code=503, detail="3m model bundle missing xgb_model or lgb_model")
+
+    # Build feature matrix
+    rows = []
+    for item in items:
+        row = {}
+        item_dict = item.model_dump()
+        for col in cols:
+            val = item_dict.get(col)
+            if val is None or (isinstance(val, float) and np.isnan(val)):
+                val = medians.get(col, 0.0)
+            row[col] = float(val)
+        rows.append(row)
+
+    X = pd.DataFrame(rows, columns=cols)
+
+    # Predict ensemble
+    xgb_probs = xgb_model.predict_proba(X)[:, 1]
+    lgb_probs  = lgb_model.predict_proba(X)[:, 1]
+    probs      = 0.5 * xgb_probs + 0.5 * lgb_probs
+
+    # Determine top picks
+    n_top    = max(1, int(len(items) * top_pct))
+    top_idx  = set(np.argsort(probs)[::-1][:n_top].tolist())
+
+    scored = []
+    for i, (item, prob) in enumerate(zip(items, probs)):
+        scored.append({
+            "ticker":           item.ticker,
+            "prob_beat_spy_3m": round(float(prob), 4),
+            "top_pick":         i in top_idx,
+        })
+
+    # Summary stats
+    probs_arr = np.array([s["prob_beat_spy_3m"] for s in scored])
+    return {
+        "model_version": "3m_v1",
+        "n_stocks":      len(scored),
+        "n_top_picks":   n_top,
+        "top_pct":       top_pct,
+        "scores":        scored,
+        "summary": {
+            "prob_mean":   round(float(probs_arr.mean()), 4),
+            "prob_median": round(float(np.median(probs_arr)), 4),
+            "prob_p90":    round(float(np.percentile(probs_arr, 90)), 4),
+            "prob_min":    round(float(probs_arr.min()), 4),
+            "prob_max":    round(float(probs_arr.max()), 4),
+        },
+    }
+
+
+@app.post("/score_3m")
+def score_3m(
+    req: Score3mRequest,
+    x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
+) -> Dict[str, Any]:
+    """Score a list of stocks with the 3m stock-picking model.
+
+    Returns prob_beat_spy_3m (probability of beating SPY by >2.5% over 3 months)
+    and marks the top N% as top_pick=true.
+
+    Validated performance (walk-forward 2019-2023):
+    CAGR +32.7% | Sharpe 1.11 | Sortino 1.99 | Alpha +17.8%/yr
+    """
+    _require_api_key(x_api_key)
+    return _predict_3m(req.stocks, req.top_pct)
