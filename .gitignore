@@ -102,6 +102,12 @@ data/training/v3/
 !data/metrics/experts_v2_report.json
 !data/metrics/experts_v2_report.txt
 
+# =========================
+# ✅ V15 outputs (explicit allow)
+# =========================
+!data/metrics/v15_results.json
+!models/stock_picker_v15.joblib
+
 
 
 

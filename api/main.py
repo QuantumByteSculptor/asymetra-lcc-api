@@ -124,6 +124,24 @@ _MODEL_3M_BACKTEST = {
     "universe_size":          301,
 }
 
+# V15 — regime-aware walk-forward model (2017-2024 OOF backtest)
+_MODEL_V15_BACKTEST = {
+    "model_version":          "v15",
+    "backtest_sharpe":        1.167,
+    "backtest_sortino":       2.933,
+    "backtest_cagr":          0.198,
+    "backtest_max_drawdown":  -0.147,
+    "calmar":                 1.345,
+    "test_period":            "2020-2024 (walk-forward OOF)",
+    "walk_forward_folds":     8,
+    "mean_roc_auc_cv":        0.513,
+    "feature_count":          18,
+    "universe_size":          50,
+    "regime_innovation":      "Bear→0% / Sideways→50% / Bull→100% exposure",
+    "v14b_sharpe_ref":        1.61,
+    "v14b_max_drawdown_ref":  -0.138,
+}
+
 # Optional debug toggles (control verbosity / extra debug fields)
 DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True")
 
@@ -1453,6 +1471,7 @@ def metrics() -> Dict[str, Any]:
         "score_stats": score_stats,
         "expert_non_null_calls": expert_non_null,
         "model_3m": _MODEL_3M_BACKTEST,
+        "model_v15": _MODEL_V15_BACKTEST,
     }
 
 
