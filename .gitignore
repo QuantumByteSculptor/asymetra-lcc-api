@@ -108,6 +108,13 @@ data/training/v3/
 !data/metrics/v15_results.json
 !models/stock_picker_v15.joblib
 
+# =========================
+# ✅ V16 outputs (explicit allow)
+# =========================
+!data/metrics/v16_results.json
+!models/stock_picker_v16.joblib
+!data/cache/fundamentals_v16.pkl
+
 
 
 

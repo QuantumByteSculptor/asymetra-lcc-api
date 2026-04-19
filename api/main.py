@@ -142,6 +142,29 @@ _MODEL_V15_BACKTEST = {
     "v14b_max_drawdown_ref":  -0.138,
 }
 
+# V16 — regime + fundamentals + momentum walk-forward (2020-2024 OOF backtest)
+_MODEL_V16_BACKTEST = {
+    "model_version":              "v16",
+    "backtest_sharpe":            1.214,   # regime-filter variant (best)
+    "backtest_sortino":           5.455,
+    "backtest_cagr":              0.222,
+    "backtest_max_drawdown":     -0.145,
+    "calmar":                     1.529,
+    "test_period":                "2020-2024 (walk-forward OOF)",
+    "walk_forward_folds":         8,
+    "mean_roc_auc_cv":            0.520,
+    "feature_count":              33,
+    "n_tech_features":            14,
+    "n_fundamental_features":     12,
+    "n_regime_features":          3,
+    "universe_size":              50,
+    "innovations_vs_v15":         "fundamentals from yfinance.info (cross-sectional)",
+    "momentum_filter":            "mom_12_1>0 AND ret_12m>spy_12m (applied at portfolio level)",
+    "delta_sharpe_vs_v15":        0.047,
+    "delta_sharpe_vs_v14b":      -0.396,
+    "fund_data_note":             "static cross-sectional snapshot; prod upgrade: SimFin point-in-time",
+}
+
 # Optional debug toggles (control verbosity / extra debug fields)
 DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True")
 
@@ -1472,6 +1495,7 @@ def metrics() -> Dict[str, Any]:
         "expert_non_null_calls": expert_non_null,
         "model_3m": _MODEL_3M_BACKTEST,
         "model_v15": _MODEL_V15_BACKTEST,
+        "model_v16": _MODEL_V16_BACKTEST,
     }
 
 
