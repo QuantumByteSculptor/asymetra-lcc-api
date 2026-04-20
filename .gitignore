@@ -122,6 +122,16 @@ data/training/v3/
 !models/stock_picker_v17.joblib
 # Note: data/cache/edgar_v17/ contains large per-ticker JSON.gz files — not versioned
 
+# =========================
+# ✅ V18 outputs (explicit allow)
+# =========================
+!data/metrics/v18_results.json
+!models/stock_picker_v18.joblib
 
-
+# =========================
+# ✅ V19 outputs (explicit allow)
+# =========================
+!data/metrics/v19_results.json
+!models/stock_picker_v19.joblib
+# Note: V19 reuses data/cache/edgar_v17/ (not re-versioned)
 

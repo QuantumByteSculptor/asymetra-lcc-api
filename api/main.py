@@ -190,6 +190,54 @@ _MODEL_V17_BACKTEST: Dict[str, Any] = {
     "fund_coverage_mean_pct":     81,
 }
 
+# V18 — sector-relative fundamental normalization + composite features (2020-2024 OOF backtest)
+_MODEL_V18_BACKTEST: Dict[str, Any] = {
+    "model_version":              "v18",
+    "backtest_sharpe":            1.346,
+    "backtest_sortino":           3.068,
+    "backtest_cagr":              0.208,
+    "backtest_max_drawdown":     -0.134,
+    "calmar":                     1.559,
+    "test_period":                "2020-2024 (walk-forward OOF)",
+    "walk_forward_folds":         8,
+    "mean_roc_auc_cv":            0.532,
+    "feature_count":              53,
+    "n_fund_abs":                 15,
+    "n_fund_sect_rank":           15,
+    "n_composite":                5,
+    "universe_size":              50,
+    "innovations_vs_v17":         "sector-relative percentile ranks for all 15 fund features + quality/value/growth composites",
+    "delta_sharpe_vs_v17":       -0.032,
+    "delta_sharpe_vs_v14b":      -0.264,
+    "note":                       "ROC-AUC improved (0.532 vs 0.525); sector ranks appear in top-10 features; composites add noise",
+}
+
+# V19 — macro overlay: yield curve (^TNX-^IRX) + credit spreads (HYG/LQD) (2020-2024 OOF backtest)
+_MODEL_V19_BACKTEST: Dict[str, Any] = {
+    "model_version":              "v19",
+    "backtest_sharpe":            1.364,   # regime-only variant (best); macro-adjusted=1.161
+    "backtest_sortino":           3.266,
+    "backtest_cagr":              0.217,
+    "backtest_max_drawdown":     -0.141,
+    "calmar":                     1.542,
+    "test_period":                "2020-2024 (walk-forward OOF)",
+    "walk_forward_folds":         8,
+    "mean_roc_auc_cv":            0.500,
+    "feature_count":              38,
+    "n_tech_features":            14,
+    "n_fundamental_features":     15,
+    "n_regime_features":          3,
+    "n_macro_features":           5,
+    "universe_size":              50,
+    "innovations_vs_v17":         "yield curve slope (^TNX-^IRX) + credit spread (HYG/LQD) as model features + macro_factor exposure multiplier",
+    "data_source":                "SEC EDGAR XBRL + yfinance (^TNX, ^IRX, HYG, LQD monthly)",
+    "macro_features":             ["yc_slope", "yc_slope_3m_chg", "credit_spread_3m", "credit_spread_6m", "macro_factor"],
+    "macro_factor_formula":       "sqrt(yc_score × cr_score) where yc∈[-0.8,+1.2]→0..1, cr∈[-0.06,0]→0..1",
+    "delta_sharpe_vs_v17":       -0.014,
+    "delta_sharpe_vs_v14b":      -0.246,
+    "note":                       "macro features appear in top-10 (macro_factor #7, yc_slope #10); exposure multiplier reduces CAGR too aggressively in bull regimes (avg_macro_factor=0.27 in bull periods)",
+}
+
 # Optional debug toggles (control verbosity / extra debug fields)
 DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True")
 
@@ -1522,6 +1570,8 @@ def metrics() -> Dict[str, Any]:
         "model_v15": _MODEL_V15_BACKTEST,
         "model_v16": _MODEL_V16_BACKTEST,
         "model_v17": _MODEL_V17_BACKTEST,
+        "model_v18": _MODEL_V18_BACKTEST,
+        "model_v19": _MODEL_V19_BACKTEST,
     }
 
 

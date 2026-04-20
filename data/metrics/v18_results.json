@@ -1,0 +1,415 @@
+{
+  "model_version": "v18",
+  "training_date": "2026-04-20T11:09:49",
+  "best_variant": "v18_regime_only",
+  "data_source": "SEC EDGAR XBRL + sector-relative normalization",
+  "config": {
+    "start": "2017-01-01",
+    "end": "2024-12-31",
+    "universe_size": 50,
+    "n_test_months": 6,
+    "min_train_months": 24,
+    "n_features": 53,
+    "features": [
+      "ret_1m",
+      "ret_3m",
+      "ret_6m",
+      "ret_12m",
+      "mom_12_1",
+      "ret_vs_spy_3m",
+      "spy_1m",
+      "spy_12m",
+      "vol_ann",
+      "vol_ratio",
+      "skew_12m",
+      "above_200ma",
+      "trend_strength",
+      "dd_from_hi52",
+      "vix_level",
+      "spy_mom_6m",
+      "regime_id",
+      "gross_margin",
+      "op_margin",
+      "net_margin",
+      "roe",
+      "debt_to_equity",
+      "rd_intensity",
+      "fcf_margin",
+      "revenue_growth",
+      "ni_growth",
+      "pe_ratio",
+      "pb_ratio",
+      "earnings_yield",
+      "current_ratio",
+      "asset_growth",
+      "accruals_ratio",
+      "gross_margin_sr",
+      "op_margin_sr",
+      "net_margin_sr",
+      "roe_sr",
+      "debt_to_equity_sr",
+      "rd_intensity_sr",
+      "fcf_margin_sr",
+      "revenue_growth_sr",
+      "ni_growth_sr",
+      "pe_ratio_sr",
+      "pb_ratio_sr",
+      "earnings_yield_sr",
+      "current_ratio_sr",
+      "asset_growth_sr",
+      "accruals_ratio_sr",
+      "quality_factor",
+      "value_factor",
+      "growth_factor",
+      "piotroski_proxy",
+      "mom_quality_int",
+      "sector_id"
+    ],
+    "n_fund_abs": 15,
+    "n_fund_sect": 15,
+    "n_composite": 5,
+    "sector_norm": "percentile rank within (month×sector) — cross-sectional, no look-ahead"
+  },
+  "cv_summary": {
+    "mean_roc_auc": 0.5318,
+    "std_roc_auc": 0.0519,
+    "mean_pr_auc": 0.4629,
+    "mean_brier": 0.2435
+  },
+  "fold_metrics": [
+    {
+      "fold": 1,
+      "train_end": "2020-03-01",
+      "val_start": "2020-07-01",
+      "val_end": "2021-01-01",
+      "n_train": 1300,
+      "n_val": 300,
+      "roc_auc": 0.4349,
+      "pr_auc": 0.4235,
+      "brier": 0.2503,
+      "pos_rate": 0.47,
+      "n_tech": 14,
+      "n_fund_abs": 12,
+      "n_fund_sect": 12,
+      "n_composite": 5,
+      "per_regime": {
+        "bull": {
+          "n": 0,
+          "roc_auc": null
+        },
+        "sideways": {
+          "n": 250,
+          "roc_auc": 0.4263
+        },
+        "bear": {
+          "n": 50,
+          "roc_auc": 0.4752
+        }
+      }
+    },
+    {
+      "fold": 2,
+      "train_end": "2020-09-01",
+      "val_start": "2021-01-01",
+      "val_end": "2021-07-01",
+      "n_train": 1600,
+      "n_val": 300,
+      "roc_auc": 0.5327,
+      "pr_auc": 0.5039,
+      "brier": 0.2455,
+      "pos_rate": 0.4333,
+      "n_tech": 14,
+      "n_fund_abs": 12,
+      "n_fund_sect": 12,
+      "n_composite": 5,
+      "per_regime": {
+        "bull": {
+          "n": 100,
+          "roc_auc": 0.656
+        },
+        "sideways": {
+          "n": 100,
+          "roc_auc": 0.6124
+        },
+        "bear": {
+          "n": 100,
+          "roc_auc": 0.3286
+        }
+      }
+    },
+    {
+      "fold": 3,
+      "train_end": "2021-03-01",
+      "val_start": "2021-07-01",
+      "val_end": "2022-01-01",
+      "n_train": 1900,
+      "n_val": 300,
+      "roc_auc": 0.523,
+      "pr_auc": 0.4753,
+      "brier": 0.2443,
+      "pos_rate": 0.4133,
+      "n_tech": 14,
+      "n_fund_abs": 14,
+      "n_fund_sect": 14,
+      "n_composite": 5,
+      "per_regime": {
+        "bull": {
+          "n": 150,
+          "roc_auc": 0.5231
+        },
+        "sideways": {
+          "n": 100,
+          "roc_auc": 0.5442
+        },
+        "bear": {
+          "n": 50,
+          "roc_auc": 0.4448
+        }
+      }
+    },
+    {
+      "fold": 4,
+      "train_end": "2021-09-01",
+      "val_start": "2022-01-01",
+      "val_end": "2022-07-01",
+      "n_train": 2200,
+      "n_val": 300,
+      "roc_auc": 0.5374,
+      "pr_auc": 0.4187,
+      "brier": 0.2432,
+      "pos_rate": 0.4067,
+      "n_tech": 14,
+      "n_fund_abs": 14,
+      "n_fund_sect": 14,
+      "n_composite": 5,
+      "per_regime": {
+        "bull": {
+          "n": 0,
+          "roc_auc": null
+        },
+        "sideways": {
+          "n": 100,
+          "roc_auc": 0.4402
+        },
+        "bear": {
+          "n": 200,
+          "roc_auc": 0.5809
+        }
+      }
+    },
+    {
+      "fold": 5,
+      "train_end": "2022-03-01",
+      "val_start": "2022-07-01",
+      "val_end": "2023-01-01",
+      "n_train": 2500,
+      "n_val": 300,
+      "roc_auc": 0.5158,
+      "pr_auc": 0.4963,
+      "brier": 0.247,
+      "pos_rate": 0.45,
+      "n_tech": 14,
+      "n_fund_abs": 14,
+      "n_fund_sect": 14,
+      "n_composite": 5,
+      "per_regime": {
+        "bull": {
+          "n": 0,
+          "roc_auc": null
+        },
+        "sideways": {
+          "n": 100,
+          "roc_auc": 0.6297
+        },
+        "bear": {
+          "n": 200,
+          "roc_auc": 0.4783
+        }
+      }
+    },
+    {
+      "fold": 6,
+      "train_end": "2022-09-01",
+      "val_start": "2023-01-01",
+      "val_end": "2023-07-01",
+      "n_train": 2800,
+      "n_val": 300,
+      "roc_auc": 0.6401,
+      "pr_auc": 0.512,
+      "brier": 0.235,
+      "pos_rate": 0.3333,
+      "n_tech": 14,
+      "n_fund_abs": 14,
+      "n_fund_sect": 14,
+      "n_composite": 5,
+      "per_regime": {
+        "bull": {
+          "n": 100,
+          "roc_auc": 0.5874
+        },
+        "sideways": {
+          "n": 200,
+          "roc_auc": 0.6701
+        },
+        "bear": {
+          "n": 0,
+          "roc_auc": null
+        }
+      }
+    },
+    {
+      "fold": 7,
+      "train_end": "2023-03-01",
+      "val_start": "2023-07-01",
+      "val_end": "2024-01-01",
+      "n_train": 3100,
+      "n_val": 300,
+      "roc_auc": 0.5411,
+      "pr_auc": 0.5101,
+      "brier": 0.2436,
+      "pos_rate": 0.41,
+      "n_tech": 14,
+      "n_fund_abs": 14,
+      "n_fund_sect": 14,
+      "n_composite": 5,
+      "per_regime": {
+        "bull": {
+          "n": 250,
+          "roc_auc": 0.5605
+        },
+        "sideways": {
+          "n": 50,
+          "roc_auc": 0.4433
+        },
+        "bear": {
+          "n": 0,
+          "roc_auc": null
+        }
+      }
+    },
+    {
+      "fold": 8,
+      "train_end": "2023-09-01",
+      "val_start": "2024-01-01",
+      "val_end": "2024-07-01",
+      "n_train": 3400,
+      "n_val": 300,
+      "roc_auc": 0.5293,
+      "pr_auc": 0.3633,
+      "brier": 0.2394,
+      "pos_rate": 0.3567,
+      "n_tech": 14,
+      "n_fund_abs": 14,
+      "n_fund_sect": 14,
+      "n_composite": 5,
+      "per_regime": {
+        "bull": {
+          "n": 300,
+          "roc_auc": 0.5293
+        },
+        "sideways": {
+          "n": 0,
+          "roc_auc": null
+        },
+        "bear": {
+          "n": 0,
+          "roc_auc": null
+        }
+      }
+    }
+  ],
+  "backtest": {
+    "v18_regime_only": {
+      "n_periods": 16,
+      "cagr": 0.2082,
+      "sharpe": 1.3457,
+      "sortino": 3.0683,
+      "max_drawdown": -0.1336,
+      "calmar": 1.5587,
+      "hit_rate": 0.75
+    },
+    "v18_regime_and_momentum": {
+      "n_periods": 16,
+      "cagr": 0.2048,
+      "sharpe": 1.1011,
+      "sortino": 3.0251,
+      "max_drawdown": -0.1539,
+      "calmar": 1.3307,
+      "hit_rate": 0.75
+    },
+    "spy_benchmark": {
+      "n_periods": 16,
+      "cagr": 0.1566,
+      "sharpe": 1.0453,
+      "sortino": 2.5694,
+      "max_drawdown": -0.1463,
+      "calmar": 1.0702,
+      "hit_rate": 0.75
+    },
+    "per_regime": {
+      "bull": {
+        "n_periods": 5,
+        "cagr": 0.2029,
+        "sharpe": 1.6487,
+        "sortino": 1.6487,
+        "max_drawdown": -0.0519,
+        "calmar": 3.9122,
+        "hit_rate": 0.8,
+        "count": 5
+      },
+      "sideways": {
+        "n_periods": 6,
+        "cagr": 0.1999,
+        "sharpe": 1.0687,
+        "sortino": 1.7824,
+        "max_drawdown": -0.0835,
+        "calmar": 2.3949,
+        "hit_rate": 0.6667,
+        "count": 6
+      },
+      "bear": {
+        "n_periods": 5,
+        "cagr": 0.2236,
+        "sharpe": 1.2964,
+        "sortino": 1.2964,
+        "max_drawdown": -0.0587,
+        "calmar": 3.8082,
+        "hit_rate": 0.8,
+        "count": 5
+      }
+    },
+    "regime_counts": {
+      "bull": 5,
+      "sideways": 6,
+      "bear": 5
+    },
+    "n_months": 16
+  },
+  "feature_importance_top10": {
+    "rd_intensity": 0.03539,
+    "accruals_ratio": 0.02644,
+    "net_margin_sr": 0.02626,
+    "ni_growth": 0.02596,
+    "earnings_yield": 0.02583,
+    "accruals_ratio_sr": 0.0252,
+    "revenue_growth": 0.02469,
+    "sector_id": 0.02442,
+    "vol_ann": 0.02425,
+    "asset_growth": 0.02385
+  },
+  "comparison": {
+    "v18_best_sharpe": 1.3457,
+    "v18_best_max_drawdown": -0.1336,
+    "v18_best_cagr": 0.2082,
+    "v18_best_sortino": 3.0683,
+    "v18_best_calmar": 1.5587,
+    "v17_sharpe": 1.378,
+    "v17_max_drawdown": -0.138,
+    "v16_sharpe": 1.214,
+    "v14b_sharpe": 1.61,
+    "v14b_max_drawdown": -0.138,
+    "delta_sharpe_vs_v17": -0.032,
+    "delta_sharpe_vs_v14b": -0.264
+  },
+  "elapsed_seconds": 14.5
+}
