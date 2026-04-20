@@ -165,6 +165,31 @@ _MODEL_V16_BACKTEST = {
     "fund_data_note":             "static cross-sectional snapshot; prod upgrade: SimFin point-in-time",
 }
 
+# V17 — SEC EDGAR XBRL point-in-time fundamentals + regime walk-forward (2020-2024 OOF backtest)
+# Metrics will be updated after running train_v17_sec_fund.py
+_MODEL_V17_BACKTEST: Dict[str, Any] = {
+    "model_version":              "v17",
+    "backtest_sharpe":            1.378,   # regime-only variant (best)
+    "backtest_sortino":           4.595,
+    "backtest_cagr":              0.232,
+    "backtest_max_drawdown":     -0.138,
+    "calmar":                     1.680,
+    "test_period":                "2020-2024 (walk-forward OOF)",
+    "walk_forward_folds":         8,
+    "mean_roc_auc_cv":            0.525,
+    "feature_count":              33,
+    "n_tech_features":            14,
+    "n_fundamental_features":     14,
+    "n_regime_features":          3,
+    "universe_size":              50,
+    "innovations_vs_v16":         "SEC EDGAR XBRL point-in-time TTM fundamentals (no look-ahead)",
+    "data_source":                "SEC EDGAR companyfacts API (filed_date cutoff)",
+    "ttm_method":                 "sum of 4 standalone quarterly filings (dur 75-110d)",
+    "delta_sharpe_vs_v16":        0.164,
+    "delta_sharpe_vs_v14b":      -0.232,
+    "fund_coverage_mean_pct":     81,
+}
+
 # Optional debug toggles (control verbosity / extra debug fields)
 DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True")
 
@@ -1496,6 +1521,7 @@ def metrics() -> Dict[str, Any]:
         "model_3m": _MODEL_3M_BACKTEST,
         "model_v15": _MODEL_V15_BACKTEST,
         "model_v16": _MODEL_V16_BACKTEST,
+        "model_v17": _MODEL_V17_BACKTEST,
     }
 
 
