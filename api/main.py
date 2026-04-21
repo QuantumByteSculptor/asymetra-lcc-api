@@ -238,6 +238,64 @@ _MODEL_V19_BACKTEST: Dict[str, Any] = {
     "note":                       "macro features appear in top-10 (macro_factor #7, yc_slope #10); exposure multiplier reduces CAGR too aggressively in bull regimes (avg_macro_factor=0.27 in bull periods)",
 }
 
+_MODEL_V20A_BACKTEST: Dict[str, Any] = {
+    "model_version":              "v20a",
+    "backtest_sharpe":            1.258,   # monthly sqrt(12) — baseline for V14-B comparison
+    "backtest_sortino":           2.275,
+    "backtest_cagr":              0.240,
+    "backtest_max_drawdown":     -0.229,
+    "calmar":                     1.047,
+    "test_period":                "2020-2024 (walk-forward OOF, step=1 monthly)",
+    "walk_forward_folds":         8,
+    "mean_roc_auc_cv":            0.525,
+    "feature_count":              33,
+    "universe_size":              50,
+    "innovations_vs_v17":         "monthly backtest (step=1, sqrt(12)) for direct V14-B comparison",
+    "data_source":                "SEC EDGAR XBRL + yfinance monthly",
+    "delta_sharpe_vs_v17_quarterly": -0.120,
+    "delta_sharpe_vs_v14b_monthly":  -0.352,
+    "note":                       "V17 exact but step=1. Monthly Sharpe 1.258 vs V14-B 1.610 — gap is real, not measurement scale.",
+}
+
+_MODEL_V20B_BACKTEST: Dict[str, Any] = {
+    "model_version":              "v20b",
+    "backtest_sharpe":            1.452,   # momentum variant (best); regime-only=1.399
+    "backtest_sharpe_regime_only": 1.399,
+    "backtest_sortino":           2.989,
+    "backtest_cagr":              0.348,
+    "backtest_max_drawdown":     -0.157,
+    "calmar":                     2.214,
+    "test_period":                "2020-2024 (walk-forward OOF, step=1 monthly)",
+    "walk_forward_folds":         8,
+    "mean_roc_auc_cv":            0.549,
+    "feature_count":              34,
+    "universe_size":              50,
+    "innovations_vs_v20a":        "REGIME_EXPOSURE[bear]=0.5 (was 0.0) + feature ret_12m_vs_spy (relative alpha momentum)",
+    "data_source":                "SEC EDGAR XBRL + yfinance monthly",
+    "delta_sharpe_vs_v20a":        0.194,
+    "delta_sharpe_vs_v14b_monthly": -0.158,
+    "note":                       "Best V20 variant. Bear alpha works (bear regime Sharpe=1.53). 150-ticker V20c regressed to 1.107 — sector noise from utilities/REITs.",
+}
+
+_MODEL_V20C_BACKTEST: Dict[str, Any] = {
+    "model_version":              "v20c",
+    "backtest_sharpe":            1.106,   # momentum variant; regime-only=1.069
+    "backtest_sharpe_regime_only": 1.069,
+    "backtest_sortino":           1.921,
+    "backtest_cagr":              0.209,
+    "backtest_max_drawdown":     -0.259,
+    "calmar":                     0.807,
+    "test_period":                "2020-2024 (walk-forward OOF, step=1 monthly)",
+    "walk_forward_folds":         8,
+    "mean_roc_auc_cv":            0.512,
+    "feature_count":              34,
+    "universe_size":              148,
+    "innovations_vs_v20b":        "universe expanded from 50 to 148 tickers across 9 sectors (added utilities, REITs, materials, mid-cap financials)",
+    "data_source":                "SEC EDGAR XBRL + yfinance monthly (new edgar_v20c cache)",
+    "delta_sharpe_vs_v20b":       -0.346,
+    "note":                       "REGRESSION vs V20b. Larger universe reduced AUC from 0.549 to 0.512 — heterogeneous sectors add noise. V20b (50 tickers) remains champion.",
+}
+
 # Optional debug toggles (control verbosity / extra debug fields)
 DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "0").strip() in ("1", "true", "True")
 
@@ -1572,6 +1630,9 @@ def metrics() -> Dict[str, Any]:
         "model_v17": _MODEL_V17_BACKTEST,
         "model_v18": _MODEL_V18_BACKTEST,
         "model_v19": _MODEL_V19_BACKTEST,
+        "model_v20a": _MODEL_V20A_BACKTEST,
+        "model_v20b": _MODEL_V20B_BACKTEST,
+        "model_v20c": _MODEL_V20C_BACKTEST,
     }
 
 

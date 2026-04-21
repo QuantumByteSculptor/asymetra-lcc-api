@@ -135,3 +135,22 @@ data/training/v3/
 !models/stock_picker_v19.joblib
 # Note: V19 reuses data/cache/edgar_v17/ (not re-versioned)
 
+# =========================
+# ✅ V20a outputs (explicit allow)
+# =========================
+!data/metrics/v20a_results.json
+!models/stock_picker_v20a.joblib
+
+# =========================
+# ✅ V20b outputs (explicit allow) — BEST V20 VARIANT
+# =========================
+!data/metrics/v20b_results.json
+!models/stock_picker_v20b.joblib
+
+# =========================
+# ✅ V20c outputs (explicit allow)
+# =========================
+!data/metrics/v20c_results.json
+!models/stock_picker_v20c.joblib
+# Note: data/cache/edgar_v20c/ contains large per-ticker JSON.gz files — not versioned
+
