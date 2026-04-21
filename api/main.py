@@ -259,6 +259,8 @@ _MODEL_V20A_BACKTEST: Dict[str, Any] = {
 
 _MODEL_V20B_BACKTEST: Dict[str, Any] = {
     "model_version":              "v20b",
+    "is_production":              True,
+    "model_path":                 "models/stock_picker_v20b.joblib",
     "backtest_sharpe":            1.452,   # momentum variant (best); regime-only=1.399
     "backtest_sharpe_regime_only": 1.399,
     "backtest_sortino":           2.989,
@@ -274,7 +276,7 @@ _MODEL_V20B_BACKTEST: Dict[str, Any] = {
     "data_source":                "SEC EDGAR XBRL + yfinance monthly",
     "delta_sharpe_vs_v20a":        0.194,
     "delta_sharpe_vs_v14b_monthly": -0.158,
-    "note":                       "Best V20 variant. Bear alpha works (bear regime Sharpe=1.53). 150-ticker V20c regressed to 1.107 — sector noise from utilities/REITs.",
+    "note":                       "PRODUCTION model. Bear alpha works (bear regime Sharpe=1.53). 150-ticker V20c regressed to 1.107 — sector noise from utilities/REITs.",
 }
 
 _MODEL_V20C_BACKTEST: Dict[str, Any] = {
@@ -1624,6 +1626,14 @@ def metrics() -> Dict[str, Any]:
         "status_pct": status_pct,
         "score_stats": score_stats,
         "expert_non_null_calls": expert_non_null,
+        "production_stock_picker": {
+            "model_version":     "v20b",
+            "model_path":        "models/stock_picker_v20b.joblib",
+            "sharpe_monthly":    1.452,
+            "max_drawdown":     -0.157,
+            "cagr":              0.348,
+            "frozen":            True,
+        },
         "model_3m": _MODEL_3M_BACKTEST,
         "model_v15": _MODEL_V15_BACKTEST,
         "model_v16": _MODEL_V16_BACKTEST,
