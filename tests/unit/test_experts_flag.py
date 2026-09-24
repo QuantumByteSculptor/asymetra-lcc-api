@@ -171,9 +171,9 @@ class TestAPIWithFlag:
     @patch.dict(os.environ, {"EXPERTS_ENABLED": "0"})
     def test_health_experts_disabled_when_flag_off(self):
         from fastapi.testclient import TestClient
-        from api.main import app
-        with TestClient(app) as c:
-            r = c.get("/health")
+        from api import main
+        with TestClient(main.app, headers={"x-api-key": main.API_KEY_ENV}) as c:
+            r = c.get("/health/details")
         assert r.status_code == 200
         data = r.json()
         assert "experts" in data
@@ -182,9 +182,9 @@ class TestAPIWithFlag:
     @patch.dict(os.environ, {"EXPERTS_ENABLED": "1"})
     def test_health_experts_enabled_when_flag_on(self):
         from fastapi.testclient import TestClient
-        from api.main import app
-        with TestClient(app) as c:
-            r = c.get("/health")
+        from api import main
+        with TestClient(main.app, headers={"x-api-key": main.API_KEY_ENV}) as c:
+            r = c.get("/health/details")
         assert r.status_code == 200
         data = r.json()
         assert "experts" in data
@@ -193,7 +193,7 @@ class TestAPIWithFlag:
     @patch.dict(os.environ, {"EXPERTS_ENABLED": "0"})
     def test_score_experts_disabled_returns_null_decision(self):
         from fastapi.testclient import TestClient
-        from api.main import app
+        from api import main
         payload = {
             "ticker": "AAPL",
             "asset_type": "equity",
@@ -207,8 +207,8 @@ class TestAPIWithFlag:
             "n_used": 252,
             "missing_pct": 0.0,
         }
-        with TestClient(app) as c:
-            r = c.post("/score", json=payload, headers={"x-api-key": "test"})
+        with TestClient(main.app, headers={"x-api-key": main.API_KEY_ENV}) as c:
+            r = c.post("/score", json=payload)
         assert r.status_code == 200
         data = r.json()
         assert data["expert_decision"] is None

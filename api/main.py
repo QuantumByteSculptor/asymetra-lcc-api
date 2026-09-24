@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import hmac
 import os
 import time
 import json
@@ -16,7 +17,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import joblib
 import numpy as np
@@ -74,9 +75,13 @@ from feature_utils import (  # type: ignore
 # =============================
 # Config
 # =============================
+def _api_key_from_environment(env: Mapping[str, str]) -> str:
+    return (env.get("API_KEY") or env.get("VITE_LCC_API_KEY") or "").strip()
+
+
 UNSUP_BUNDLE_PATH = os.getenv("UNSUP_BUNDLE_PATH", "models/unsup_bundle.joblib")
 SUP_BUNDLE_PATH = os.getenv("SUP_BUNDLE_PATH", "models/sup_bundle.joblib")
-API_KEY_ENV = os.getenv("API_KEY", "")
+API_KEY_ENV = _api_key_from_environment(os.environ)
 
 XGB_SHADOW_ENABLED = os.getenv("XGB_SHADOW_ENABLED", "1").strip() not in ("0", "false", "False")
 
@@ -556,8 +561,8 @@ def _load_3m_model() -> Dict[str, Any]:
 # =============================
 def _require_api_key(x_api_key: Optional[str]) -> None:
     if not API_KEY_ENV:
-        return
-    if not x_api_key or x_api_key.strip() != API_KEY_ENV:
+        raise HTTPException(status_code=503, detail="API authentication is not configured")
+    if not x_api_key or not hmac.compare_digest(x_api_key.strip(), API_KEY_ENV):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -1592,8 +1597,9 @@ def root() -> Dict[str, Any]:
 
 
 @app.get("/metrics")
-def metrics() -> Dict[str, Any]:
+def metrics(x_api_key: Optional[str] = Header(default=None, alias="x-api-key")) -> Dict[str, Any]:
     """Statistiques agrégées des appels depuis le démarrage du serveur."""
+    _require_api_key(x_api_key)
     with _METRICS_LOCK:
         calls_score = _METRICS["calls_score"]
         calls_oracle = _METRICS["calls_score_oracle"]
@@ -1646,8 +1652,23 @@ def metrics() -> Dict[str, Any]:
     }
 
 
+def _public_health() -> Dict[str, Any]:
+    return {"ok": True, "version": app.version}
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
+    return _public_health()
+
+
+@app.get("/healthz")
+def healthz() -> Dict[str, Any]:
+    return _public_health()
+
+
+@app.get("/health/details")
+def health_details(x_api_key: Optional[str] = Header(default=None, alias="x-api-key")) -> Dict[str, Any]:
+    _require_api_key(x_api_key)
     # ----- BIN CALIBRATED STATUS -----
     bin_status: Dict[str, Any] = {
         "enabled": BIN_ENABLED,

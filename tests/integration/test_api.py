@@ -40,8 +40,8 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def client():
-    from api.main import app
-    with TestClient(app) as c:
+    from api import main
+    with TestClient(main.app, headers={"x-api-key": main.API_KEY_ENV}) as c:
         yield c
 
 
@@ -67,7 +67,7 @@ class TestHealth:
         assert data.get("ok") is True
 
     def test_health_has_experts_block(self, client):
-        data = client.get("/health").json()
+        data = client.get("/health/details").json()
         assert "experts" in data
         experts = data["experts"]
         assert "enabled" in experts

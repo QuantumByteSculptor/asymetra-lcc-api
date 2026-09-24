@@ -248,7 +248,7 @@ class TestProductionSafety:
             from fastapi.testclient import TestClient
         except ImportError:
             pytest.skip("httpx not installed")
-        from api.main import app
-        with TestClient(app) as client:
+        from api import main
+        with TestClient(main.app, headers={"x-api-key": main.API_KEY_ENV}) as client:
             r = client.post("/score", json=base_feats)
             assert r.status_code == 200
